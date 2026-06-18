@@ -64,4 +64,3 @@ jobs:
           app-name: 'MCInternalWorkbench'
           slot-name: 'Production'
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_175F125EDB13403DA2D6B22E43458DF1 }}
-          startup-command: 'python -m streamlit run streamlit_app.py --server.port 8000 --server.address 0.0.0.0'
