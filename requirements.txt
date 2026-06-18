@@ -6,4 +6,5 @@ lxml
 pypdf
 python-pptx
 openpyxl
-aiohttp
+sentence-transformers
+qdrant-client

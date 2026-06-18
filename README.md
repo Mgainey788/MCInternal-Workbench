@@ -1,8 +1,6 @@
-# 🎈 Blank app template
+# MedComms Internal Workbench
 
-A simple Streamlit app template for you to modify!
-
-[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://blank-app-template.streamlit.app/)
+A Streamlit app for MedComms source attribution, copyright QA, and reference fact-checking.
 
 ### How to run it on your own machine
 
@@ -17,3 +15,18 @@ A simple Streamlit app template for you to modify!
    ```
    $ streamlit run streamlit_app.py
    ```
+
+### Requirements
+
+| Package | Purpose |
+|---|---|
+| `streamlit` | Web app framework |
+| `pandas` | Data manipulation and Excel/CSV export |
+| `requests` | HTTP requests for URL-based source fetching |
+| `beautifulsoup4` | HTML parsing |
+| `lxml` | XML/HTML parser backend |
+| `pypdf` | PDF text extraction |
+| `python-pptx` | PowerPoint file parsing |
+| `openpyxl` | Excel file read/write |
+| `sentence-transformers` | Semantic embedding model (SPECTER2 / MiniLM) |
+| `qdrant-client` | In-memory vector store for semantic search |
