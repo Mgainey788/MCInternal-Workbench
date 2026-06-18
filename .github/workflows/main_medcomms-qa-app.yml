@@ -50,6 +50,9 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     needs: build
+    env:
+      LEGACY_PUBLISH_PROFILE: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_36C2AF5B5B324081AC786B9D6B673CD9 }}
+      FALLBACK_PUBLISH_PROFILE: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE }}
 
     steps:
       - name: Download artifact from build job
@@ -58,9 +61,25 @@ jobs:
           name: python-app
 
       - name: 'Deploy to Azure Web App'
+        if: env.LEGACY_PUBLISH_PROFILE != ''
+        uses: azure/webapps-deploy@v3
+        id: deploy-to-webapp-legacy-secret
+        with:
+          app-name: 'medcomms-qa-app'
+          slot-name: 'Production'
+          publish-profile: ${{ env.LEGACY_PUBLISH_PROFILE }}
+
+      - name: 'Deploy to Azure Web App (fallback secret)'
+        if: env.LEGACY_PUBLISH_PROFILE == '' && env.FALLBACK_PUBLISH_PROFILE != ''
         uses: azure/webapps-deploy@v3
         id: deploy-to-webapp
         with:
           app-name: 'medcomms-qa-app'
           slot-name: 'Production'
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_36C2AF5B5B324081AC786B9D6B673CD9 || secrets.AZUREAPPSERVICE_PUBLISHPROFILE }}
+          publish-profile: ${{ env.FALLBACK_PUBLISH_PROFILE }}
+
+      - name: Validate deployment secret configuration
+        if: env.LEGACY_PUBLISH_PROFILE == '' && env.FALLBACK_PUBLISH_PROFILE == ''
+        run: |
+          echo "::error::Missing Azure publish profile secret for medcomms-qa-app. Configure AZUREAPPSERVICE_PUBLISHPROFILE_36C2AF5B5B324081AC786B9D6B673CD9 or AZUREAPPSERVICE_PUBLISHPROFILE."
+          exit 1
