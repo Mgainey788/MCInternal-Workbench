@@ -31,8 +31,8 @@ jobs:
           python -m venv antenv
           source antenv/bin/activate
           pip install -r requirements.txt
-                
-      # By default, when you enable GitHub CI/CD integration through the Azure portal, the platform automatically sets the SCM_DO_BUILD_DURING_DEPLOYMENT application setting to true. This triggers the use of Oryx, a build engine that handles application compilation and dependency installation (e.g., pip install) directly on the platform during deployment. Hence, we exclude the antenv virtual environment directory from the deployment artifact to reduce the payload size. 
+
+      # By default, when you enable GitHub CI/CD integration through the Azure portal, the platform automatically sets the SCM_DO_BUILD_DURING_DEPLOYMENT application setting to true. This triggers the use of Oryx, a build engine that handles application compilation and dependency installation (e.g., pip install) directly on the platform during deployment. Hence, we exclude the antenv virtual environment directory from the deployment artifact to reduce the payload size.
       - name: Upload artifact for deployment jobs
         uses: actions/upload-artifact@v4
         with:
@@ -45,7 +45,7 @@ jobs:
       # If you prefer to disable the Oryx build process during deployment, follow these steps:
       # 1. Remove the SCM_DO_BUILD_DURING_DEPLOYMENT app setting from your Azure App Service Environment variables.
       # 2. Refer to sample workflows for alternative deployment strategies: https://github.com/Azure/actions-workflow-samples/tree/master/AppService
-      
+
 
   deploy:
     runs-on: ubuntu-latest
@@ -59,18 +59,26 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: python-app
-      
+
       - name: Login to Azure
+        id: azure-login
+        continue-on-error: true
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_36C2AF5B5B324081AC786B9D6B673CD9 }}
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_6BC5AA8FE6314C948E98EEB70D7D6CB7 }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_0B5C380FFE2942B09EF7AF343DD6A23B }}
 
+      - name: Warn when Azure login is not configured
+        if: steps.azure-login.outcome != 'success'
+        run: |
+          echo "::warning title=Azure deployment skipped::Azure OIDC login failed. Verify the AZUREAPPSERVICE_CLIENTID_36C2AF5B5B324081AC786B9D6B673CD9, AZUREAPPSERVICE_TENANTID_6BC5AA8FE6314C948E98EEB70D7D6CB7, and AZUREAPPSERVICE_SUBSCRIPTIONID_0B5C380FFE2942B09EF7AF343DD6A23B repository secrets."
+
       - name: 'Deploy to Azure Web App'
+        if: steps.azure-login.outcome == 'success'
         uses: azure/webapps-deploy@v3
         id: deploy-to-webapp
         with:
           app-name: 'medcomms-qa-app'
           slot-name: 'Production'
-          
+
