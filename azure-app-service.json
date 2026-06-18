@@ -61,6 +61,7 @@
           "linuxFxVersion": "PYTHON|3.11",
           "alwaysOn": true,
           "http20Enabled": true,
+          "appCommandLine": "python -m streamlit run streamlit_app.py --server.port 8000 --server.address 0.0.0.0",
           "appSettings": [
             {
               "name": "WEBSITES_ENABLE_APP_SERVICE_STORAGE",
