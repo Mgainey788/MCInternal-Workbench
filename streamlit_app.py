@@ -556,6 +556,8 @@ st.markdown("""
         border-radius: 14px 14px 0 0;
         padding: 12px 18px;
         font-weight: 750;
+        color: #12344d !important;
+        opacity: 1 !important;
     }
 
     .stTabs [aria-selected="true"] {
@@ -983,6 +985,111 @@ def normalize_doi(text):
         .replace("doi.org/", "")
         .strip()
     )
+
+
+def _annotation_int(value):
+    try:
+        if value is None or value == "":
+            return None
+        return int(float(value))
+    except Exception:
+        return None
+
+
+def _annotation_clean_component(text, default_value="Unknown"):
+    cleaned = clean_text(text)
+    cleaned = cleaned.replace("_", " ")
+    cleaned = re.sub(r"[^A-Za-z0-9\s&\-]", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned or default_value
+
+
+def _annotation_author_last_name(citation_text, source_name=""):
+    citation = clean_text(citation_text)
+    if citation:
+        first_chunk = re.split(r"[.;]", citation, maxsplit=1)[0]
+        author_match = re.search(r"[A-Za-z][A-Za-z'\-]+", first_chunk)
+        if author_match:
+            return _annotation_clean_component(author_match.group(0), default_value="Unknown")
+
+    source_base = re.sub(r"\.[A-Za-z0-9]+$", "", clean_text(source_name))
+    if source_base:
+        tokens = [t for t in re.split(r"[_\-\s]+", source_base) if t]
+        if tokens:
+            return _annotation_clean_component(tokens[0], default_value="Unknown")
+
+    return "Unknown"
+
+
+def _annotation_publication_year(citation_text, article_title="", source_name=""):
+    combined = clean_text(" ".join([citation_text or "", article_title or "", source_name or ""]))
+    year_match = re.search(r"\b(19\d{2}|20\d{2})\b", combined)
+    return year_match.group(1) if year_match else "UnknownYear"
+
+
+def _annotation_journal_abbrev(citation_text, source_name=""):
+    citation = clean_text(citation_text)
+    if citation:
+        segments = [clean_text(segment) for segment in re.split(r"\.\s+", citation) if clean_text(segment)]
+        if len(segments) >= 3:
+            candidate = segments[2]
+            candidate = re.sub(r"\b(19\d{2}|20\d{2})\b.*$", "", candidate).strip(" ,;:-")
+            if candidate:
+                return _annotation_clean_component(candidate, default_value="UnknownJournal")
+
+    source_base = re.sub(r"\.[A-Za-z0-9]+$", "", clean_text(source_name))
+    if source_base:
+        tokens = [t for t in re.split(r"[_\-\s]+", source_base) if t]
+        year_idx = None
+        for idx, token in enumerate(tokens):
+            if re.fullmatch(r"(19\d{2}|20\d{2})", token):
+                year_idx = idx
+                break
+
+        if year_idx is not None and year_idx > 1:
+            journal_tokens = tokens[1:year_idx]
+        else:
+            journal_tokens = tokens[1:4] if len(tokens) > 1 else []
+
+        if journal_tokens:
+            return _annotation_clean_component(" ".join(journal_tokens), default_value="UnknownJournal")
+
+    return "UnknownJournal"
+
+
+def _annotation_suppl_token(citation_text):
+    citation = clean_text(citation_text)
+    match = re.search(r"\bSuppl\.?\s*([A-Za-z0-9]+)?", citation, flags=re.IGNORECASE)
+    if not match:
+        return ""
+    suffix = (match.group(1) or "").strip()
+    if suffix:
+        return f"Suppl{suffix}"
+    return "Suppl"
+
+
+def build_journal_article_annotation(citation="", article_title="", source_name="", page_number=None, paragraph_number=None):
+    """
+    Journal-article style annotation format:
+    Last name of author_journal abbreviation_year_Suppl(if applicable)_pX_paraY
+    """
+    author_last = _annotation_author_last_name(citation, source_name=source_name)
+    journal_abbrev = _annotation_journal_abbrev(citation, source_name=source_name)
+    publication_year = _annotation_publication_year(citation, article_title=article_title, source_name=source_name)
+    suppl_token = _annotation_suppl_token(citation)
+
+    parts = [author_last, journal_abbrev, publication_year]
+    if suppl_token:
+        parts.append(suppl_token)
+
+    page_i = _annotation_int(page_number)
+    para_i = _annotation_int(paragraph_number)
+    if page_i is not None:
+        parts.append(f"p{page_i}")
+    if para_i is not None:
+        parts.append(f"para{para_i}")
+
+    return "_".join(parts)
 
 
 def looks_like_doi(text):
@@ -2038,6 +2145,14 @@ def make_attribution_row(
     section_heading="",
     confidence_level="",
 ):
+    annotation_format = build_journal_article_annotation(
+        citation=citation,
+        article_title=article_title,
+        source_name=article_title,
+        page_number=page_number,
+        paragraph_number=paragraph_number,
+    )
+
     return {
         "workflow": workflow,
         "claim_number": claim_number,
@@ -2062,6 +2177,7 @@ def make_attribution_row(
         "reviewer_note": reviewer_note or "",
         "section_heading": section_heading or "",
         "confidence_level": confidence_level or "",
+        "annotation_format": annotation_format,
     }
 
 
@@ -3721,7 +3837,11 @@ def search_uploaded_article_library(claims, uploaded_article_files, article_text
                 status = attribution_status(match["score"], match["passage"], claim=claim)
                 location = f"Local passage #{match['passage_number']}"
                 if match.get("page_number"):
-                    location = f"PDF page {match['page_number']} | {location}"
+                    page_para = match.get("paragraph_number")
+                    if page_para is not None:
+                        location = f"PDF page {match['page_number']} | paragraph {page_para}"
+                    else:
+                        location = f"PDF page {match['page_number']} | {location}"
 
                 rows.append(make_attribution_row(
                     workflow="Local full-text source attribution",
@@ -4270,10 +4390,14 @@ def render_professional_rows(rows, show_client_check=True):
                         rank_table["Section"] = rank_table["section_heading"].replace("", "body")
                     else:
                         rank_table["Section"] = "body"
+                    if "annotation_format" in rank_table.columns:
+                        rank_table["Annotation"] = rank_table["annotation_format"].replace("", "-")
+                    else:
+                        rank_table["Annotation"] = "-"
 
                     st.markdown("**Supporting Locations (Top 5)**")
                     st.dataframe(
-                        rank_table[["Rank", "Page", "Paragraph", "Score", "Section"]],
+                        rank_table[["Rank", "Page", "Paragraph", "Score", "Section", "Annotation"]],
                         use_container_width=True,
                         hide_index=True,
                     )
@@ -4296,6 +4420,8 @@ def render_professional_rows(rows, show_client_check=True):
                             st.write(f"Page: {int(loc.get('page_number'))}")
                         if loc.get("paragraph_number"):
                             st.write(f"Paragraph: {int(loc.get('paragraph_number'))}")
+                        if loc.get("annotation_format"):
+                            st.write(f"Annotation: {loc.get('annotation_format')}")
                         section_value = loc.get("section_heading", "") or "body"
                         st.write(f"Section Heading: {section_value}")
                         st.write(f"Support Strength: {match_strength_label(loc.get('score', 0))}")
@@ -4321,6 +4447,8 @@ def render_professional_rows(rows, show_client_check=True):
                     confidence_label = confidence_level_label(primary.get("score", 0))
 
                     st.markdown(f"**Best Source Candidate:** {primary.get('citation', '')}")
+                    if primary.get("annotation_format"):
+                        st.markdown(f"**Suggested Annotation:** {primary.get('annotation_format')}")
                     if not has_supporting_passage:
                         st.warning("No direct supporting passage was found for this candidate.")
 
@@ -4665,6 +4793,12 @@ def citation_qa_to_log_row(result, claim_text="", reference_text=""):
     if result.get("clean_reference"):
         supporting += "\n\nCleaned-up reference:\n" + result.get("clean_reference", "")
 
+    annotation_format = build_journal_article_annotation(
+        citation=result.get("correct_source", "") or reference_text,
+        article_title=result.get("source_title", ""),
+        source_name=result.get("source_title", ""),
+    )
+
     return {
         "workflow": "Citation QA Resolver",
         "claim_number": 1,
@@ -4680,6 +4814,7 @@ def citation_qa_to_log_row(result, claim_text="", reference_text=""):
         "url": result.get("url", ""),
         "client_source": reference_text,
         "recommendation": result.get("recommendation", ""),
+        "annotation_format": annotation_format,
     }
 
 
