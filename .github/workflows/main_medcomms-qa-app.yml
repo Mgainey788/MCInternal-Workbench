@@ -77,7 +77,6 @@ jobs:
           app-name: 'medcomms-qa-app'
           slot-name: 'Production'
           publish-profile: ${{ env.FALLBACK_PUBLISH_PROFILE }}
-          startup-command: 'python -m streamlit run streamlit_app.py --server.port 8000 --server.address 0.0.0.0'
 
       - name: Validate deployment secret configuration
         if: env.LEGACY_PUBLISH_PROFILE == '' && env.FALLBACK_PUBLISH_PROFILE == ''
