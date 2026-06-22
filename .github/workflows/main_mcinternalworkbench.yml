@@ -8,13 +8,6 @@ on:
   push:
     branches:
       - main
-    paths:
-      - 'streamlit_app.py'
-      - 'requirements.txt'
-      - 'Dockerfile'
-      - '.github/workflows/main_mcinternalworkbench.yml'
-      - '*.py'
-      - '!streamlit_app (2).py'
   workflow_dispatch:
 
 jobs:
