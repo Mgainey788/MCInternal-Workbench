@@ -1027,6 +1027,46 @@ def _annotation_publication_year(citation_text, article_title="", source_name=""
     return year_match.group(1) if year_match else "UnknownYear"
 
 
+def infer_publication_year_from_document_text(document_text="", source_name=""):
+    """
+    Best-effort publication year inference for uploaded full-text sources.
+    Priority: explicit publication/copyright phrases, then early document years,
+    then source-name year.
+    """
+    current_year = datetime.now().year + 1
+
+    head = clean_text(document_text)[:12000]
+    source = clean_text(source_name)
+
+    explicit_patterns = [
+        r"\b(?:published|publication\s+date|date\s+of\s+publication|issued|release(?:d)?|updated)\D{0,20}(19\d{2}|20\d{2})\b",
+        r"(?:©|copyright)\D{0,20}(19\d{2}|20\d{2})\b",
+    ]
+    for pattern in explicit_patterns:
+        match = re.search(pattern, head, flags=re.IGNORECASE)
+        if match:
+            year = int(match.group(1))
+            if 1900 <= year <= current_year:
+                return str(year)
+
+    # Prefer an early year mention, which is usually in the title page/header.
+    early_head = head[:2500]
+    early_years = re.findall(r"\b(19\d{2}|20\d{2})\b", early_head)
+    for y in early_years:
+        yi = int(y)
+        if 1900 <= yi <= current_year:
+            return y
+
+    # Fallback to source/file name if it embeds a year.
+    source_year_match = re.search(r"\b(19\d{2}|20\d{2})\b", source)
+    if source_year_match:
+        year = int(source_year_match.group(1))
+        if 1900 <= year <= current_year:
+            return source_year_match.group(1)
+
+    return ""
+
+
 def _annotation_journal_abbrev(citation_text, source_name=""):
     citation = clean_text(citation_text)
     if citation:
@@ -1068,14 +1108,23 @@ def _annotation_suppl_token(citation_text):
     return "Suppl"
 
 
-def build_journal_article_annotation(citation="", article_title="", source_name="", page_number=None, paragraph_number=None):
+def build_journal_article_annotation(
+    citation="",
+    article_title="",
+    source_name="",
+    page_number=None,
+    paragraph_number=None,
+    source_publication_year="",
+):
     """
     Journal-article style annotation format:
     Last name of author_journal abbreviation_year_Suppl(if applicable)_pX_paraY
     """
     author_last = _annotation_author_last_name(citation, source_name=source_name)
     journal_abbrev = _annotation_journal_abbrev(citation, source_name=source_name)
-    publication_year = _annotation_publication_year(citation, article_title=article_title, source_name=source_name)
+    publication_year = clean_text(source_publication_year)
+    if not re.fullmatch(r"(19\d{2}|20\d{2})", publication_year or ""):
+        publication_year = _annotation_publication_year(citation, article_title=article_title, source_name=source_name)
     suppl_token = _annotation_suppl_token(citation)
 
     parts = [author_last, journal_abbrev, publication_year]
@@ -2144,6 +2193,7 @@ def make_attribution_row(
     reviewer_note="",
     section_heading="",
     confidence_level="",
+    source_publication_year="",
 ):
     annotation_format = build_journal_article_annotation(
         citation=citation,
@@ -2151,6 +2201,7 @@ def make_attribution_row(
         source_name=article_title,
         page_number=page_number,
         paragraph_number=paragraph_number,
+        source_publication_year=source_publication_year,
     )
 
     return {
@@ -3602,6 +3653,7 @@ def split_article_into_passages(article_text, source_name=""):
 
     passages = []
     running_passage_number = 0
+    source_publication_year = infer_publication_year_from_document_text(raw_text, source_name=source_name)
 
     # PDF extraction labels pages as "Page N: ...". Keep that page context for result display.
     page_chunks = re.split(r"(?=\bPage\s+\d+\s*:)", raw_text)
@@ -3643,6 +3695,7 @@ def split_article_into_passages(article_text, source_name=""):
 
             passages.append({
                 "source_name": source_name,
+                "source_publication_year": source_publication_year,
                 "passage_number": running_passage_number,
                 "page_paragraph_number": page_paragraph_number,
                 "page_number": page_number,
@@ -3755,6 +3808,7 @@ def search_uploaded_article_library(claims, uploaded_article_files, article_text
                     "claim_number": claim_number,
                     "claim": claim,
                     "source_name": item["source_name"],
+                    "source_publication_year": item.get("source_publication_year", ""),
                     "passage_number": item["passage_number"],
                     "page_number": item.get("page_number"),
                     "paragraph_number": item.get("page_paragraph_number", item["passage_number"]),
@@ -3862,6 +3916,7 @@ def search_uploaded_article_library(claims, uploaded_article_files, article_text
                     support_focus="; ".join(match.get("fragment_support", [])[:3]),
                     reviewer_note=reviewer_note if rank_index == 1 else "",
                     section_heading=match.get("section_label", ""),
+                    source_publication_year=match.get("source_publication_year", ""),
                 ))
         else:
             rows.append(make_attribution_row(
