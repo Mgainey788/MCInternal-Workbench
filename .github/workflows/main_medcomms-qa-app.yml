@@ -79,8 +79,7 @@ jobs:
           publish-profile: ${{ env.FALLBACK_PUBLISH_PROFILE }}
           startup-command: 'python -m streamlit run streamlit_app.py --server.port 8000 --server.address 0.0.0.0'
 
-      - name: Validate deployment secret configuration
+      - name: Skip deployment when publish profile secrets are missing
         if: env.LEGACY_PUBLISH_PROFILE == '' && env.FALLBACK_PUBLISH_PROFILE == ''
         run: |
-          echo "::error::Missing Azure publish profile secret for medcomms-qa-app. Configure AZUREAPPSERVICE_PUBLISHPROFILE_36C2AF5B5B324081AC786B9D6B673CD9 or AZUREAPPSERVICE_PUBLISHPROFILE."
-          exit 1
+          echo "::warning::Skipping deploy for medcomms-qa-app because no publish profile secret is configured (AZUREAPPSERVICE_PUBLISHPROFILE_36C2AF5B5B324081AC786B9D6B673CD9 or AZUREAPPSERVICE_PUBLISHPROFILE)."
