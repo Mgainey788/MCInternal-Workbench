@@ -121,6 +121,7 @@ class SemanticLibrary:
                     "passage": passages[idx].get("passage", ""),
                     "source_name": passages[idx].get("source_name", ""),
                     "page_number": passages[idx].get("page_number"),
+                    "page_paragraph_number": passages[idx].get("page_paragraph_number"),
                     "passage_number": passages[idx].get("passage_number"),
                     "section_label": passages[idx].get("section_label", "body"),
                     "doi": passages[idx].get("doi", ""),
@@ -162,6 +163,7 @@ class SemanticLibrary:
                 "passage": payload.get("passage", ""),
                 "source_name": payload.get("source_name", ""),
                 "page_number": payload.get("page_number"),
+                "page_paragraph_number": payload.get("page_paragraph_number"),
                 "passage_number": payload.get("passage_number"),
                 "section_label": payload.get("section_label", "body"),
                 "doi": payload.get("doi", ""),
@@ -3091,9 +3093,15 @@ def render_semantic_fact_check_result(result: dict):
     if top_passages:
         st.markdown("**Supporting Locations:**")
         for rank_i, p in enumerate(top_passages, 1):
+            page_para = p.get("page_paragraph_number")
+            page_no = p.get("page_number")
+            location_label = (
+                f"Page {page_no} | Paragraph {page_para}"
+                if page_no is not None and page_para is not None
+                else f"Page {page_no or '?'} | Passage {p.get('passage_number') or '?'}"
+            )
             with st.expander(
-                f"#{rank_i} — Page {p.get('page_number') or '?'} | "
-                f"Passage {p.get('passage_number') or '?'} | "
+                f"#{rank_i} — {location_label} | "
                 f"Section: {p.get('section_label', 'body')} | "
                 f"Score: {p.get('final_score', 0)}",
                 expanded=(rank_i == 1),
@@ -3811,7 +3819,7 @@ def search_uploaded_article_library(claims, uploaded_article_files, article_text
                     "source_publication_year": item.get("source_publication_year", ""),
                     "passage_number": item["passage_number"],
                     "page_number": item.get("page_number"),
-                    "paragraph_number": item.get("page_paragraph_number", item["passage_number"]),
+                    "paragraph_number": item.get("page_paragraph_number") if item.get("page_number") is not None else None,
                     "line_range": "",
                     "passage": passage,
                     "support_type": support_type,
@@ -3844,9 +3852,10 @@ def search_uploaded_article_library(claims, uploaded_article_files, article_text
                     "claim_number": claim_number,
                     "claim": claim,
                     "source_name": item["source_name"],
+                    "source_publication_year": item.get("source_publication_year", ""),
                     "passage_number": item["passage_number"],
                     "page_number": item.get("page_number"),
-                    "paragraph_number": item.get("page_paragraph_number", item["passage_number"]),
+                    "paragraph_number": item.get("page_paragraph_number") if item.get("page_number") is not None else None,
                     "line_range": "",
                     "passage": passage,
                     "support_type": support_type,
