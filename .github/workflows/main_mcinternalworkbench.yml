@@ -65,7 +65,7 @@ jobs:
         uses: azure/webapps-deploy@v3
         id: deploy-to-webapp-legacy-secret
         with:
-          app-name: 'mcinternal-workbench'
+          app-name: 'MCInternalWorkbench'
           slot-name: 'Production'
           publish-profile: ${{ env.LEGACY_PUBLISH_PROFILE }}
           startup-command: 'python -m streamlit run streamlit_app.py --server.port 8000 --server.address 0.0.0.0'
@@ -75,7 +75,7 @@ jobs:
         uses: azure/webapps-deploy@v3
         id: deploy-to-webapp
         with:
-          app-name: 'mcinternal-workbench'
+          app-name: 'MCInternalWorkbench'
           slot-name: 'Production'
           publish-profile: ${{ env.FALLBACK_PUBLISH_PROFILE }}
           startup-command: 'python -m streamlit run streamlit_app.py --server.port 8000 --server.address 0.0.0.0'
@@ -83,5 +83,5 @@ jobs:
       - name: Validate deployment secret configuration
         if: env.LEGACY_PUBLISH_PROFILE == '' && env.FALLBACK_PUBLISH_PROFILE == ''
         run: |
-          echo "::error::Missing Azure publish profile secret for mcinternal-workbench. Configure AZUREAPPSERVICE_PUBLISHPROFILE_175F125EDB13403DA2D6B22E43458DF1 or AZUREAPPSERVICE_PUBLISHPROFILE."
+          echo "::error::Missing Azure publish profile secret for MCInternalWorkbench. Configure AZUREAPPSERVICE_PUBLISHPROFILE_175F125EDB13403DA2D6B22E43458DF1 or AZUREAPPSERVICE_PUBLISHPROFILE."
           exit 1
