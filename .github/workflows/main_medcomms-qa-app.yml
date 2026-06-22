@@ -8,6 +8,10 @@ on:
   push:
     branches:
       - main
+    paths:
+      - 'streamlit_app (2).py'
+      - 'requirements.txt'
+      - '.github/workflows/main_medcomms-qa-app.yml'
   workflow_dispatch:
 
 jobs:
