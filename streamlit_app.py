@@ -4514,16 +4514,18 @@ def render_professional_rows(rows, show_client_check=True):
                         rank_table["Section"] = rank_table["section_heading"].replace("", "body")
                     else:
                         rank_table["Section"] = "body"
+                    if "annotation_format" in rank_table.columns:
+                        rank_table["Annotation Format"] = rank_table["annotation_format"].replace("", "-")
+                    else:
+                        rank_table["Annotation Format"] = "-"
                     if "suggested_annotation" in rank_table.columns:
                         rank_table["Suggested Annotation"] = rank_table["suggested_annotation"].replace("", "-")
-                    elif "annotation_format" in rank_table.columns:
-                        rank_table["Suggested Annotation"] = rank_table["annotation_format"].replace("", "-")
                     else:
                         rank_table["Suggested Annotation"] = "-"
 
                     st.markdown("**Supporting Locations (Top 5)**")
                     st.dataframe(
-                        rank_table[["Rank", "Source Location", "Score", "Section", "Suggested Annotation"]],
+                        rank_table[["Rank", "Source Location", "Score", "Section", "Annotation Format", "Suggested Annotation"]],
                         use_container_width=True,
                         hide_index=True,
                     )
@@ -4551,6 +4553,8 @@ def render_professional_rows(rows, show_client_check=True):
                             st.write(f"Source Location: {source_location}")
                         if loc.get("matched_supporting_text"):
                             st.write(f"Matched Supporting Text: {loc.get('matched_supporting_text')}")
+                        if loc.get("annotation_format"):
+                            st.write(f"Annotation Format: {loc.get('annotation_format')}")
                         suggested_annotation = loc.get("suggested_annotation") or loc.get("annotation_format")
                         if suggested_annotation:
                             st.write(f"Suggested Annotation: {suggested_annotation}")
@@ -4579,6 +4583,8 @@ def render_professional_rows(rows, show_client_check=True):
                     confidence_label = confidence_level_label(primary.get("score", 0))
 
                     st.markdown(f"**Best Source Candidate:** {primary.get('citation', '')}")
+                    if primary.get("annotation_format"):
+                        st.markdown(f"**Annotation Format:** {primary.get('annotation_format')}")
                     suggested_annotation = primary.get("suggested_annotation") or primary.get("annotation_format")
                     if suggested_annotation:
                         st.markdown(f"**Suggested Annotation:** {suggested_annotation}")
