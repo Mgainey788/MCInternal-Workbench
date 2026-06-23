@@ -1143,6 +1143,51 @@ def build_journal_article_annotation(
     return "_".join(parts)
 
 
+def build_source_location_label(page_number=None, paragraph_number=None, line_range=""):
+    page_i = _annotation_int(page_number)
+    para_i = _annotation_int(paragraph_number)
+    if page_i is None or para_i is None:
+        return ""
+
+    label = f"Page {page_i}, Paragraph {para_i}"
+    line_text = clean_text(line_range)
+    if line_text:
+        label += f", Line(s) {line_text}"
+    return label
+
+
+def build_source_location_annotation(
+    reference_name="",
+    claim_text="",
+    page_number=None,
+    paragraph_number=None,
+    line_range="",
+    supporting_text="",
+):
+    source_location = build_source_location_label(
+        page_number=page_number,
+        paragraph_number=paragraph_number,
+        line_range=line_range,
+    )
+    claim_text = clean_text(claim_text)
+    reference_name = clean_text(reference_name) or "Reference"
+    supporting_text = clean_text(supporting_text)
+
+    suggested_annotation = ""
+    if source_location and claim_text:
+        reference_text = f"supported by {reference_name}, page {_annotation_int(page_number)}, paragraph {_annotation_int(paragraph_number)}"
+        line_text = clean_text(line_range)
+        if line_text:
+            reference_text += f", line(s) {line_text}"
+        suggested_annotation = f"{claim_text} — {reference_text}."
+
+    return {
+        "source_location": source_location,
+        "matched_supporting_text": f'"{supporting_text}"' if supporting_text else "",
+        "suggested_annotation": suggested_annotation,
+    }
+
+
 def looks_like_doi(text):
     return re.match(r"^10\.\d{4,9}/[-._;()/:A-Z0-9]+$", text or "", re.IGNORECASE) is not None
 
@@ -2197,6 +2242,14 @@ def make_attribution_row(
     confidence_level="",
     source_publication_year="",
 ):
+    source_location = build_source_location_annotation(
+        reference_name=citation or article_title,
+        claim_text=claim,
+        page_number=page_number,
+        paragraph_number=paragraph_number,
+        line_range=line_range,
+        supporting_text=supporting_passage,
+    )
     annotation_format = build_journal_article_annotation(
         citation=citation,
         article_title=article_title,
@@ -2231,6 +2284,9 @@ def make_attribution_row(
         "section_heading": section_heading or "",
         "confidence_level": confidence_level or "",
         "annotation_format": annotation_format,
+        "source_location_display": source_location["source_location"],
+        "matched_supporting_text": source_location["matched_supporting_text"],
+        "suggested_annotation": source_location["suggested_annotation"],
     }
 
 
@@ -3095,11 +3151,9 @@ def render_semantic_fact_check_result(result: dict):
         for rank_i, p in enumerate(top_passages, 1):
             page_para = p.get("page_paragraph_number")
             page_no = p.get("page_number")
-            location_label = (
-                f"Page {page_no} | Paragraph {page_para}"
-                if page_no is not None and page_para is not None
-                else f"Page {page_no or '?'} | Passage {p.get('passage_number') or '?'}"
-            )
+            location_label = build_source_location_label(page_no, page_para)
+            if not location_label:
+                location_label = f"Page {page_no or '?'}, Paragraph {page_para or '?'}"
             with st.expander(
                 f"#{rank_i} — {location_label} | "
                 f"Section: {p.get('section_label', 'body')} | "
@@ -3902,9 +3956,9 @@ def search_uploaded_article_library(claims, uploaded_article_files, article_text
                 if match.get("page_number"):
                     page_para = match.get("paragraph_number")
                     if page_para is not None:
-                        location = f"PDF page {match['page_number']} | paragraph {page_para}"
+                        location = f"Page {match['page_number']}, Paragraph {page_para}"
                     else:
-                        location = f"PDF page {match['page_number']} | {location}"
+                        location = f"Page {match['page_number']}, Paragraph ?"
 
                 rows.append(make_attribution_row(
                     workflow="Local full-text source attribution",
@@ -4447,21 +4501,29 @@ def render_professional_rows(rows, show_client_check=True):
 
                     rank_table = local_ranked_rows.copy()
                     rank_table["Rank"] = range(1, len(rank_table) + 1)
-                    rank_table["Page"] = rank_table["page_number"].fillna("-")
-                    rank_table["Paragraph"] = rank_table["paragraph_number"].fillna("-")
+                    rank_table["Source Location"] = rank_table.apply(
+                        lambda row: build_source_location_label(
+                            row.get("page_number"),
+                            row.get("paragraph_number"),
+                            row.get("line_range", ""),
+                        ) or "-",
+                        axis=1,
+                    )
                     rank_table["Score"] = rank_table["score"].fillna(0)
                     if "section_heading" in rank_table.columns:
                         rank_table["Section"] = rank_table["section_heading"].replace("", "body")
                     else:
                         rank_table["Section"] = "body"
-                    if "annotation_format" in rank_table.columns:
-                        rank_table["Annotation"] = rank_table["annotation_format"].replace("", "-")
+                    if "suggested_annotation" in rank_table.columns:
+                        rank_table["Suggested Annotation"] = rank_table["suggested_annotation"].replace("", "-")
+                    elif "annotation_format" in rank_table.columns:
+                        rank_table["Suggested Annotation"] = rank_table["annotation_format"].replace("", "-")
                     else:
-                        rank_table["Annotation"] = "-"
+                        rank_table["Suggested Annotation"] = "-"
 
                     st.markdown("**Supporting Locations (Top 5)**")
                     st.dataframe(
-                        rank_table[["Rank", "Page", "Paragraph", "Score", "Section", "Annotation"]],
+                        rank_table[["Rank", "Source Location", "Score", "Section", "Suggested Annotation"]],
                         use_container_width=True,
                         hide_index=True,
                     )
@@ -4480,12 +4542,18 @@ def render_professional_rows(rows, show_client_check=True):
 
                     for _, loc in local_ranked_rows.iterrows():
                         st.markdown("**Supporting Location**")
-                        if loc.get("page_number"):
-                            st.write(f"Page: {int(loc.get('page_number'))}")
-                        if loc.get("paragraph_number"):
-                            st.write(f"Paragraph: {int(loc.get('paragraph_number'))}")
-                        if loc.get("annotation_format"):
-                            st.write(f"Annotation: {loc.get('annotation_format')}")
+                        source_location = loc.get("source_location_display") or build_source_location_label(
+                            loc.get("page_number"),
+                            loc.get("paragraph_number"),
+                            loc.get("line_range", ""),
+                        )
+                        if source_location:
+                            st.write(f"Source Location: {source_location}")
+                        if loc.get("matched_supporting_text"):
+                            st.write(f"Matched Supporting Text: {loc.get('matched_supporting_text')}")
+                        suggested_annotation = loc.get("suggested_annotation") or loc.get("annotation_format")
+                        if suggested_annotation:
+                            st.write(f"Suggested Annotation: {suggested_annotation}")
                         section_value = loc.get("section_heading", "") or "body"
                         st.write(f"Section Heading: {section_value}")
                         st.write(f"Support Strength: {match_strength_label(loc.get('score', 0))}")
@@ -4511,8 +4579,9 @@ def render_professional_rows(rows, show_client_check=True):
                     confidence_label = confidence_level_label(primary.get("score", 0))
 
                     st.markdown(f"**Best Source Candidate:** {primary.get('citation', '')}")
-                    if primary.get("annotation_format"):
-                        st.markdown(f"**Suggested Annotation:** {primary.get('annotation_format')}")
+                    suggested_annotation = primary.get("suggested_annotation") or primary.get("annotation_format")
+                    if suggested_annotation:
+                        st.markdown(f"**Suggested Annotation:** {suggested_annotation}")
                     if not has_supporting_passage:
                         st.warning("No direct supporting passage was found for this candidate.")
 
@@ -4879,6 +4948,9 @@ def citation_qa_to_log_row(result, claim_text="", reference_text=""):
         "client_source": reference_text,
         "recommendation": result.get("recommendation", ""),
         "annotation_format": annotation_format,
+        "source_location_display": "",
+        "matched_supporting_text": "",
+        "suggested_annotation": "",
     }
 
 
