@@ -329,7 +329,7 @@ with st.sidebar:
 #### **Local Full-Text Search** 📄
 **When:** You have uploaded the full article/PDF and need to find a specific statement within it.  
 **Input:** Upload one or more PDFs/TXT files + paste the statement you're looking for.  
-**Output:** Exact passages and page numbers where the statement appears.  
+**Output:** Exact passages and page numbers where the statement appears (page numbering follows the PDF viewer navigation box label).  
 **Example:** Upload ASAM guideline PDF → Search for "naloxone challenge protocol" → See exact page with the statement.  
 **✓ Use this for:** Verifying you have the *right* document and pinpointing exact locations.  
 **⚠ Note:** Compliance gate only required if uploading files. Can paste text without gate.
@@ -998,6 +998,11 @@ def _annotation_int(value):
         return None
 
 
+def _annotation_page_value(value):
+    text = clean_text(value)
+    return text or None
+
+
 def _annotation_clean_component(text, default_value="Unknown"):
     cleaned = clean_text(text)
     cleaned = cleaned.replace("_", " ")
@@ -1144,12 +1149,12 @@ def build_journal_article_annotation(
 
 
 def build_source_location_label(page_number=None, paragraph_number=None, line_range=""):
-    page_i = _annotation_int(page_number)
+    page_text = _annotation_page_value(page_number)
     para_i = _annotation_int(paragraph_number)
-    if page_i is None or para_i is None:
+    if page_text is None or para_i is None:
         return ""
 
-    label = f"Page {page_i}, Paragraph {para_i}"
+    label = f"Page {page_text}, Paragraph {para_i}"
     line_text = clean_text(line_range)
     if line_text:
         label += f", Line(s) {line_text}"
@@ -1175,7 +1180,9 @@ def build_source_location_annotation(
 
     suggested_annotation = ""
     if source_location and claim_text:
-        reference_text = f"supported by {reference_name}, page {_annotation_int(page_number)}, paragraph {_annotation_int(paragraph_number)}"
+        page_text = _annotation_page_value(page_number)
+        para_i = _annotation_int(paragraph_number)
+        reference_text = f"supported by {reference_name}, page {page_text}, paragraph {para_i}"
         line_text = clean_text(line_range)
         if line_text:
             reference_text += f", line(s) {line_text}"
@@ -1315,14 +1322,24 @@ def extract_text_from_upload(uploaded_file):
                     return ""
 
             lines = []
+            page_labels = []
+            try:
+                page_labels = list(getattr(reader, "page_labels", []) or [])
+            except Exception:
+                page_labels = []
 
-            for page_number, page in enumerate(reader.pages, start=1):
+            for page_index, page in enumerate(reader.pages, start=1):
                 try:
                     page_text = page.extract_text() or ""
                 except Exception:
                     page_text = ""
                 if page_text.strip():
-                    lines.append(f"Page {page_number}: {page_text.strip()}")
+                    page_label = str(page_index)
+                    if page_index - 1 < len(page_labels):
+                        label_text = clean_text(page_labels[page_index - 1])
+                        if label_text:
+                            page_label = label_text
+                    lines.append(f"[[PDF_PAGE_LABEL:{page_label}]] {page_text.strip()}")
 
             if not lines:
                 st.warning(
@@ -3717,14 +3734,19 @@ def split_article_into_passages(article_text, source_name=""):
     running_passage_number = 0
     source_publication_year = infer_publication_year_from_document_text(raw_text, source_name=source_name)
 
-    # PDF extraction labels pages as "Page N: ...". Keep that page context for result display.
-    page_chunks = re.split(r"(?=\bPage\s+\d+\s*:)", raw_text)
+    # Keep page labels from PDF extraction so users can navigate by the viewer page box.
+    page_chunks = re.split(r"(?=\[\[PDF_PAGE_LABEL:[^\]]+\]\])|(?=\bPage\s+\d+\s*:)", raw_text)
     labeled_chunks = []
 
     for chunk in page_chunks:
+        page_label_match = re.match(r"\s*\[\[PDF_PAGE_LABEL:([^\]]+)\]\]\s*(.*)", chunk, flags=re.IGNORECASE | re.DOTALL)
+        if page_label_match:
+            labeled_chunks.append((clean_text(page_label_match.group(1)), page_label_match.group(2)))
+            continue
+
         match = re.match(r"\s*Page\s+(\d+)\s*:\s*(.*)", chunk, flags=re.IGNORECASE | re.DOTALL)
         if match:
-            labeled_chunks.append((int(match.group(1)), match.group(2)))
+            labeled_chunks.append((match.group(1), match.group(2)))
 
     if not labeled_chunks:
         labeled_chunks = [(None, raw_text)]
@@ -3752,7 +3774,8 @@ def split_article_into_passages(article_text, source_name=""):
             page_paragraph_number += 1
 
             section_label = chunk_section_label if chunk_section_label != "body" else classify_passage_section(passage)
-            if page_number == 1 and page_paragraph_number <= 8 and section_label == "body":
+            page_i = _annotation_int(page_number)
+            if page_i == 1 and page_paragraph_number <= 8 and section_label == "body":
                 section_label = "introduction"
 
             passages.append({
