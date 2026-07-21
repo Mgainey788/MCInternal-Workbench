@@ -10,6 +10,7 @@ import pandas as pd
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
+from reference_source_claims import select_reference_source_claims
 
 
 try:
@@ -3398,6 +3399,7 @@ def run_reference_source_workflow(
     """
     Find Reference Source workflow.
     Citation-like requests are resolved first so the app does not detour into broad opioid/literature results.
+    Set split_claims=False for claim-box paste flows that should be treated as one claim unit.
     """
     combined_input = f"{content or ''} {keywords or ''}".strip()
 
@@ -3415,13 +3417,12 @@ def run_reference_source_workflow(
                 )
             ]
 
-    if split_claims:
-        claims = split_into_claims(content, max_claims=max_claims)
-    else:
-        single_claim = (content or "").strip()
-        claims = [single_claim] if single_claim else []
-    if not claims and content.strip():
-        claims = [content.strip()]
+    claims = select_reference_source_claims(
+        content=content,
+        max_claims=max_claims,
+        split_claims=split_claims,
+        split_into_claims=split_into_claims,
+    )
 
     output_rows = []
 
