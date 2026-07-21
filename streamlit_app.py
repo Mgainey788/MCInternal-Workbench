@@ -3393,6 +3393,7 @@ def run_reference_source_workflow(
     use_openalex=False,
     fast_mode=True,
     citation_qa_first=True,
+    split_claims=True,
 ):
     """
     Find Reference Source workflow.
@@ -3414,7 +3415,11 @@ def run_reference_source_workflow(
                 )
             ]
 
-    claims = split_into_claims(content, max_claims=max_claims)
+    if split_claims:
+        claims = split_into_claims(content, max_claims=max_claims)
+    else:
+        single_claim = (content or "").strip()
+        claims = [single_claim] if single_claim else []
     if not claims and content.strip():
         claims = [content.strip()]
 
@@ -5946,6 +5951,7 @@ with tab_source:
                             use_openalex=source_openalex,
                             fast_mode=(source_mode == "Fast"),
                             citation_qa_first=True,
+                            split_claims=False,
                         )
                         for row in claim_rows:
                             row["claim_number"] = idx
