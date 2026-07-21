@@ -1246,6 +1246,26 @@ def get_best_oa_url(unpaywall_info):
     return location.get("url") or location.get("url_for_pdf") or ""
 
 
+@st.cache_data(show_spinner=False, ttl=3600)
+def resolve_source_article_url(url="", doi="", pmid=""):
+    direct_url = str(url or "").strip()
+    if direct_url.startswith(("http://", "https://")):
+        return direct_url
+
+    doi_norm = normalize_doi(doi)
+    if doi_norm:
+        oa_url = get_best_oa_url(check_unpaywall(doi_norm))
+        if oa_url:
+            return oa_url
+        return f"https://doi.org/{doi_norm}"
+
+    pmid_text = str(pmid or "").strip()
+    if pmid_text.isdigit():
+        return f"https://pubmed.ncbi.nlm.nih.gov/{pmid_text}/"
+
+    return ""
+
+
 # =========================================================
 # FILE EXTRACTION
 # =========================================================
@@ -1567,6 +1587,7 @@ def trace_source_via_references(claim_text, seed_candidates, keywords="", use_se
         "passage": best.get("passage", ""),
         "citation": best.get("citation", ""),
         "doi": best.get("doi", ""),
+        "pmid": best.get("pmid", ""),
         "url": best.get("url", ""),
         "recommendation": "Direct evidence was found after tracing references from a related source. Prefer this older/original source over newer discussion articles.",
     }
@@ -1673,6 +1694,7 @@ def resolve_exact_source_quote(claim_text, keywords="", use_semantic_scholar=Fal
         "passage": best.get("passage", ""),
         "citation": best.get("citation", ""),
         "doi": best.get("doi", ""),
+        "pmid": best.get("pmid", ""),
         "url": best.get("url", ""),
         "recommendation": f"{best.get('match_type', 'Exact match')} identified before broad ranking. Use this as the primary source.",
     }
@@ -2259,6 +2281,7 @@ def make_attribution_row(
     confidence_level="",
     source_publication_year="",
 ):
+    resolved_url = resolve_source_article_url(url=url, doi=doi, pmid=pmid)
     source_location = build_source_location_annotation(
         reference_name=citation or article_title,
         claim_text=claim,
@@ -2289,7 +2312,7 @@ def make_attribution_row(
         "citation": citation or "",
         "doi": doi or "",
         "pmid": pmid or "",
-        "url": url or "",
+        "url": resolved_url,
         "client_source": client_source or "",
         "recommendation": recommendation or "",
         "page_number": page_number,
@@ -3419,6 +3442,7 @@ def run_reference_source_workflow(
                 supporting_passage=known_exact.get("passage", ""),
                 citation=known_exact.get("citation", ""),
                 doi=known_exact.get("doi", ""),
+                pmid=known_exact.get("pmid", ""),
                 url=known_exact.get("url", ""),
                 recommendation=known_exact.get("recommendation", ""),
                 support_focus=statement_type,
@@ -3483,6 +3507,7 @@ def run_reference_source_workflow(
                         supporting_passage=traced.get("passage", ""),
                         citation=traced.get("citation", ""),
                         doi=traced.get("doi", ""),
+                        pmid=traced.get("pmid", ""),
                         url=traced.get("url", ""),
                         recommendation=traced.get("recommendation", ""),
                         support_focus=statement_type,
@@ -3508,6 +3533,7 @@ def run_reference_source_workflow(
                         supporting_passage=best_abstract.get("passage", ""),
                         citation=best_abstract.get("citation", ""),
                         doi=best_abstract.get("doi", ""),
+                        pmid=best_abstract.get("pmid", ""),
                         url=best_abstract.get("url", ""),
                         recommendation=(
                             "No exact accessible full text was verified. Returning the best abstract/source-backed candidate with similar wording and conclusion."
@@ -3529,6 +3555,7 @@ def run_reference_source_workflow(
                             supporting_passage=alt.get("passage", ""),
                             citation=alt.get("citation", ""),
                             doi=alt.get("doi", ""),
+                            pmid=alt.get("pmid", ""),
                             url=alt.get("url", ""),
                             recommendation="Alternative abstract/source match when exact full text is not accessible.",
                             support_focus=statement_type,
@@ -3570,6 +3597,7 @@ def run_reference_source_workflow(
                     supporting_passage=best_abstract.get("passage", ""),
                     citation=best_abstract.get("citation", ""),
                     doi=best_abstract.get("doi", ""),
+                    pmid=best_abstract.get("pmid", ""),
                     url=best_abstract.get("url", ""),
                     recommendation="No exact accessible full text was verified. Returning the best abstract/source-supported candidate.",
                     support_focus=statement_type,
@@ -3588,6 +3616,7 @@ def run_reference_source_workflow(
                         supporting_passage=alt.get("passage", ""),
                         citation=alt.get("citation", ""),
                         doi=alt.get("doi", ""),
+                        pmid=alt.get("pmid", ""),
                         url=alt.get("url", ""),
                         recommendation="Alternative abstract/source match when exact full text is not accessible.",
                         support_focus=statement_type,
@@ -3632,6 +3661,7 @@ def run_reference_source_workflow(
             supporting_passage=best.get("passage", ""),
             citation=best.get("citation", ""),
             doi=best.get("doi", ""),
+            pmid=best.get("pmid", ""),
             url=best.get("url", ""),
             recommendation=recommendation,
             support_focus=statement_type,
@@ -3651,6 +3681,7 @@ def run_reference_source_workflow(
                 supporting_passage=alt.get("passage", ""),
                 citation=alt.get("citation", ""),
                 doi=alt.get("doi", ""),
+                pmid=alt.get("pmid", ""),
                 url=alt.get("url", ""),
                 recommendation="Alternative match. Use only if it directly supports the statement wording.",
                 support_focus=statement_type,
@@ -4442,13 +4473,14 @@ def _show_status(status):
 
 
 def _show_source_link(url, doi="", pmid=""):
+    resolved_url = resolve_source_article_url(url=url, doi=doi, pmid=pmid)
     link_items = []
     if doi:
         link_items.append(f"**DOI:** {doi}")
     if pmid:
         link_items.append(f"**PMID:** {pmid}")
-    if url:
-        link_items.append(f"[Open Source Article]({url})")
+    if resolved_url:
+        link_items.append(f"[Open Source Article]({resolved_url})")
     if link_items:
         st.markdown(" | ".join(link_items))
 
@@ -4625,7 +4657,7 @@ def render_professional_rows(rows, show_client_check=True):
                         st.info(primary.get("supporting_passage", ""))
                     else:
                         st.warning("No direct supporting passage returned. This should be treated as supporting evidence only, not definitive original-source proof.")
-                    _show_source_link(primary.get("url", ""), primary.get("doi", ""))
+                    _show_source_link(primary.get("url", ""), primary.get("doi", ""), primary.get("pmid", ""))
 
         alt_rows = group[group["workflow"] == "Alternative source clue"]
         if not alt_rows.empty:
@@ -4640,7 +4672,7 @@ def render_professional_rows(rows, show_client_check=True):
                     st.write(f"Match type: {match_type_label(alt.get('claim', ''), alt.get('supporting_passage', ''))}")
                     if alt.get("supporting_passage"):
                         st.write(alt.get("supporting_passage"))
-                    _show_source_link(alt.get("url", ""), alt.get("doi", ""))
+                    _show_source_link(alt.get("url", ""), alt.get("doi", ""), alt.get("pmid", ""))
                     st.divider()
 
     return df
