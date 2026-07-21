@@ -2381,13 +2381,21 @@ def search_pubmed(query, rows=8):
         pubdate = item.get("pubdate", "")
         authors = item.get("authors", [])
         author_list = ", ".join([a.get("name", "") for a in authors[:4] if a.get("name")])
+        article_ids = item.get("articleids", []) or []
+        doi = ""
+        for article_id in article_ids:
+            id_type = clean_text(article_id.get("idtype", "")).lower()
+            if id_type == "doi":
+                doi = normalize_doi(article_id.get("value", "") or article_id.get("id", ""))
+                if doi:
+                    break
         citation = f"{author_list}. {title}. {journal}. {pubdate}."
 
         results.append({
             "title": title,
             "citation": citation,
             "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
-            "doi": "",
+            "doi": doi,
         })
 
     return results
@@ -2500,6 +2508,77 @@ def crossref_summary(item):
     }
 
 
+def extract_crossref_abstract(item):
+    raw_abstract = ""
+    if isinstance(item, dict):
+        raw_abstract = item.get("abstract", "") or ""
+    if not raw_abstract:
+        return ""
+    return clean_text(BeautifulSoup(str(raw_abstract), "html.parser").get_text(" ", strip=True))
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_source_record_fallback(doi="", pmid="", fallback_url=""):
+    doi_norm = normalize_doi(doi)
+    pmid_text = str(pmid or "").strip()
+    queries = []
+
+    if pmid_text.isdigit():
+        queries.append(f"EXT_ID:{pmid_text} AND SRC:MED")
+    if doi_norm:
+        queries.append(f'DOI:"{doi_norm}"')
+
+    for query in queries:
+        try:
+            items = search_europe_pmc(query, rows=3)
+        except Exception:
+            continue
+
+        for item in items:
+            abstract = clean_text(item.get("abstractText", ""))
+            result_pmid = str(item.get("pmid", "") or pmid_text).strip()
+            pmcid = clean_text(item.get("pmcid", ""))
+            result_doi = normalize_doi(item.get("doi", "") or doi_norm)
+
+            landing_url = ""
+            if pmcid:
+                landing_url = f"https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/"
+            elif result_pmid.isdigit():
+                landing_url = f"https://pubmed.ncbi.nlm.nih.gov/{result_pmid}/"
+            elif result_doi:
+                landing_url = f"https://doi.org/{result_doi}"
+
+            if abstract or landing_url:
+                return {
+                    "abstract": abstract,
+                    "url": landing_url or fallback_url,
+                    "doi": result_doi,
+                    "pmid": result_pmid,
+                }
+
+    if doi_norm:
+        try:
+            crossref_item = get_crossref_by_doi(doi_norm).get("message", {})
+        except Exception:
+            crossref_item = {}
+
+        abstract = extract_crossref_abstract(crossref_item)
+        if abstract:
+            return {
+                "abstract": abstract,
+                "url": fallback_url or f"https://doi.org/{doi_norm}",
+                "doi": doi_norm,
+                "pmid": pmid_text,
+            }
+
+    return {
+        "abstract": "",
+        "url": fallback_url,
+        "doi": doi_norm,
+        "pmid": pmid_text,
+    }
+
+
 def openalex_abstract_from_inverted_index(work):
     inverted = work.get("abstract_inverted_index") or {}
     if not inverted:
@@ -2563,13 +2642,20 @@ def normalize_pubmed_item(item, claim, query, keywords="", source_hint=""):
     title = clean_text(item.get("title", ""))
     citation = clean_text(item.get("citation", ""))
     url = item.get("url", "")
+    doi = normalize_doi(item.get("doi", ""))
     pmid_match = re.search(r"pubmed\.ncbi\.nlm\.nih\.gov/(\d+)/", url or "")
     pmid = pmid_match.group(1) if pmid_match else ""
+    fallback = fetch_source_record_fallback(doi=doi, pmid=pmid, fallback_url=url)
+    abstract = fallback.get("abstract", "")
+    passage = best_supporting_passage(claim, abstract=abstract)
+    retrieval_type = f"Metadata query: {query}"
+    if abstract:
+        retrieval_type = f"Metadata + abstract fallback: {query}"
     score = score_candidate(
         claim=claim,
         title=title,
         citation=citation,
-        passage="",
+        passage=passage,
         source_type="metadata",
         keywords=keywords,
         source_hint=source_hint,
@@ -2578,12 +2664,12 @@ def normalize_pubmed_item(item, claim, query, keywords="", source_hint=""):
     return {
         "title": title,
         "database": "PubMed metadata",
-        "retrieval_type": f"Metadata query: {query}",
+        "retrieval_type": retrieval_type,
         "citation": citation,
-        "doi": item.get("doi", ""),
-        "pmid": pmid,
-        "url": url,
-        "passage": "",
+        "doi": fallback.get("doi", "") or doi,
+        "pmid": fallback.get("pmid", "") or pmid,
+        "url": fallback.get("url", "") or url,
+        "passage": passage,
         "score": score,
     }
 
@@ -2592,12 +2678,22 @@ def normalize_crossref_item(item, claim, query, keywords="", source_hint=""):
     info = crossref_summary(item)
     title = clean_text(info.get("title", ""))
     citation = f"{title}. {info.get('journal', '')}. {info.get('published', '')}. {info.get('publisher', '')}."
+    crossref_abstract = extract_crossref_abstract(item)
+    fallback = fetch_source_record_fallback(
+        doi=info.get("doi", ""),
+        fallback_url=info.get("url", ""),
+    )
+    abstract = crossref_abstract or fallback.get("abstract", "")
+    passage = best_supporting_passage(claim, abstract=abstract)
+    retrieval_type = f"Metadata query: {query}"
+    if abstract:
+        retrieval_type = f"Metadata + abstract fallback: {query}"
 
     score = score_candidate(
         claim=claim,
         title=title,
         citation=citation,
-        passage="",
+        passage=passage,
         source_type="metadata",
         keywords=keywords,
         source_hint=source_hint,
@@ -2606,12 +2702,12 @@ def normalize_crossref_item(item, claim, query, keywords="", source_hint=""):
     return {
         "title": title,
         "database": "Crossref metadata",
-        "retrieval_type": f"Metadata query: {query}",
+        "retrieval_type": retrieval_type,
         "citation": citation,
-        "doi": info.get("doi", ""),
+        "doi": fallback.get("doi", "") or info.get("doi", ""),
         "pmid": "",
-        "url": info.get("url", ""),
-        "passage": "",
+        "url": fallback.get("url", "") or info.get("url", ""),
+        "passage": passage,
         "score": score,
     }
 
@@ -2629,11 +2725,13 @@ def normalize_semantic_scholar_item(item, claim, query, keywords="", source_hint
     external_ids = item.get("externalIds", {}) or {}
     doi = external_ids.get("DOI", "")
     pubmed_id = external_ids.get("PubMed", "")
+    oa_pdf = item.get("openAccessPdf") or {}
+
+    if oa_pdf.get("url"):
+        url = oa_pdf.get("url")
 
     if not url and pubmed_id:
         url = f"https://pubmed.ncbi.nlm.nih.gov/{pubmed_id}/"
-
-    oa_pdf = item.get("openAccessPdf") or {}
     if not url and oa_pdf.get("url"):
         url = oa_pdf.get("url")
 
@@ -3536,7 +3634,7 @@ def run_reference_source_workflow(
                         pmid=best_abstract.get("pmid", ""),
                         url=best_abstract.get("url", ""),
                         recommendation=(
-                            "No exact accessible full text was verified. Returning the best abstract/source-backed candidate with similar wording and conclusion."
+                            "No exact accessible full text was verified. Returning the best abstract/source-backed candidate with similar wording and conclusion. Use the source link to open the abstract or landing page and reach the full text if available."
                         ),
                         support_focus=statement_type,
                     ))
@@ -3557,7 +3655,7 @@ def run_reference_source_workflow(
                             doi=alt.get("doi", ""),
                             pmid=alt.get("pmid", ""),
                             url=alt.get("url", ""),
-                            recommendation="Alternative abstract/source match when exact full text is not accessible.",
+                            recommendation="Alternative abstract/source match when exact full text is not accessible. Use the source link to open the abstract or landing page and reach the full text if available.",
                             support_focus=statement_type,
                         ))
                     continue
@@ -3599,7 +3697,7 @@ def run_reference_source_workflow(
                     doi=best_abstract.get("doi", ""),
                     pmid=best_abstract.get("pmid", ""),
                     url=best_abstract.get("url", ""),
-                    recommendation="No exact accessible full text was verified. Returning the best abstract/source-supported candidate.",
+                    recommendation="No exact accessible full text was verified. Returning the best abstract/source-supported candidate. Use the source link to open the abstract or landing page and reach the full text if available.",
                     support_focus=statement_type,
                 ))
 
@@ -3618,7 +3716,7 @@ def run_reference_source_workflow(
                         doi=alt.get("doi", ""),
                         pmid=alt.get("pmid", ""),
                         url=alt.get("url", ""),
-                        recommendation="Alternative abstract/source match when exact full text is not accessible.",
+                        recommendation="Alternative abstract/source match when exact full text is not accessible. Use the source link to open the abstract or landing page and reach the full text if available.",
                         support_focus=statement_type,
                     ))
                 continue
@@ -4652,7 +4750,8 @@ def render_professional_rows(rows, show_client_check=True):
                     st.markdown(f"**Confidence Level:** {confidence_label}")
                     st.markdown("**Why This Source Was Selected**")
                     st.write(primary.get("recommendation", ""))
-                    st.markdown("**Supporting Passage**")
+                    passage_label = "Supporting Abstract" if "abstract" in str(primary.get("retrieval_type", "")).lower() else "Supporting Passage"
+                    st.markdown(f"**{passage_label}**")
                     if primary.get("supporting_passage"):
                         st.info(primary.get("supporting_passage", ""))
                     else:
