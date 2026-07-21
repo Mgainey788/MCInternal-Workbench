@@ -2324,7 +2324,7 @@ def make_attribution_row(
         "reviewer_note": reviewer_note or "",
         "section_heading": section_heading or "",
         "confidence_level": confidence_level or "",
-        "evidence_source_type": evidence_source_type or ("abstract" if "abstract" in str(retrieval_type).lower() else ""),
+        "evidence_source_type": evidence_source_type or "",
         "annotation_format": annotation_format,
         "source_location_display": source_location["source_location"],
         "matched_supporting_text": source_location["matched_supporting_text"],
@@ -2516,7 +2516,11 @@ def extract_crossref_abstract(item):
         raw_abstract = item.get("abstract", "") or ""
     if not raw_abstract:
         return ""
-    return clean_text(BeautifulSoup(str(raw_abstract), "html.parser").get_text(" ", strip=True))
+    return clean_text(html_fragment_to_text(raw_abstract))
+
+
+def html_fragment_to_text(value, parser="html.parser"):
+    return BeautifulSoup(str(value or ""), parser).get_text(" ", strip=True)
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
@@ -2585,6 +2589,65 @@ def metadata_retrieval_label(query, has_abstract=False):
     return f"Metadata + abstract fallback: {query}" if has_abstract else f"Metadata query: {query}"
 
 
+def enrich_candidate_with_source_fallback(candidate, claim, keywords="", source_hint=""):
+    prepared = dict(candidate or {})
+    if clean_text(prepared.get("passage", "")):
+        return prepared
+
+    database = clean_text(prepared.get("database", ""))
+    if database not in {"PubMed metadata", "Crossref metadata"}:
+        return prepared
+
+    fallback = fetch_source_record_fallback(
+        doi=prepared.get("doi", ""),
+        pmid=prepared.get("pmid", ""),
+        fallback_url=prepared.get("url", ""),
+    )
+    abstract = fallback.get("abstract", "")
+    if not abstract:
+        return prepared
+
+    passage = best_supporting_passage(claim, abstract=abstract)
+    if not passage:
+        return prepared
+
+    prepared["doi"] = fallback.get("doi", "") or prepared.get("doi", "")
+    prepared["pmid"] = fallback.get("pmid", "") or prepared.get("pmid", "")
+    prepared["url"] = fallback.get("url", "") or prepared.get("url", "")
+    prepared["passage"] = passage
+
+    retrieval_type = str(prepared.get("retrieval_type", "") or "")
+    if retrieval_type.startswith("Metadata query: "):
+        prepared["retrieval_type"] = metadata_retrieval_label(
+            retrieval_type.replace("Metadata query: ", "", 1),
+            has_abstract=True,
+        )
+
+    prepared["score"] = score_candidate(
+        claim=claim,
+        title=prepared.get("title", ""),
+        citation=prepared.get("citation", ""),
+        passage=passage,
+        source_type="metadata",
+        keywords=keywords,
+        source_hint=source_hint,
+    )
+    return prepared
+
+
+def prepare_abstract_backed_candidates(claim, candidates, keywords="", source_hint="", limit=8):
+    ranked = sorted(candidates or [], key=lambda row: row.get("score", 0), reverse=True)
+    return [
+        enrich_candidate_with_source_fallback(
+            candidate,
+            claim,
+            keywords=keywords,
+            source_hint=source_hint,
+        )
+        for candidate in ranked[:limit]
+    ]
+
+
 def openalex_abstract_from_inverted_index(work):
     inverted = work.get("abstract_inverted_index") or {}
     if not inverted:
@@ -2651,15 +2714,11 @@ def normalize_pubmed_item(item, claim, query, keywords="", source_hint=""):
     doi = normalize_doi(item.get("doi", ""))
     pmid_match = re.search(r"pubmed\.ncbi\.nlm\.nih\.gov/(\d+)/", url or "")
     pmid = pmid_match.group(1) if pmid_match else ""
-    fallback = fetch_source_record_fallback(doi=doi, pmid=pmid, fallback_url=url)
-    abstract = fallback.get("abstract", "")
-    passage = best_supporting_passage(claim, abstract=abstract)
-    retrieval_type = metadata_retrieval_label(query, has_abstract=bool(abstract))
     score = score_candidate(
         claim=claim,
         title=title,
         citation=citation,
-        passage=passage,
+        passage="",
         source_type="metadata",
         keywords=keywords,
         source_hint=source_hint,
@@ -2668,12 +2727,12 @@ def normalize_pubmed_item(item, claim, query, keywords="", source_hint=""):
     return {
         "title": title,
         "database": "PubMed metadata",
-        "retrieval_type": retrieval_type,
+        "retrieval_type": metadata_retrieval_label(query, has_abstract=False),
         "citation": citation,
-        "doi": fallback.get("doi", "") or doi,
-        "pmid": fallback.get("pmid", "") or pmid,
-        "url": fallback.get("url", "") or url,
-        "passage": passage,
+        "doi": doi,
+        "pmid": pmid,
+        "url": url,
+        "passage": "",
         "score": score,
     }
 
@@ -2683,13 +2742,8 @@ def normalize_crossref_item(item, claim, query, keywords="", source_hint=""):
     title = clean_text(info.get("title", ""))
     citation = f"{title}. {info.get('journal', '')}. {info.get('published', '')}. {info.get('publisher', '')}."
     crossref_abstract = extract_crossref_abstract(item)
-    fallback = fetch_source_record_fallback(
-        doi=info.get("doi", ""),
-        fallback_url=info.get("url", ""),
-    )
-    abstract = crossref_abstract or fallback.get("abstract", "")
-    passage = best_supporting_passage(claim, abstract=abstract)
-    retrieval_type = metadata_retrieval_label(query, has_abstract=bool(abstract))
+    passage = best_supporting_passage(claim, abstract=crossref_abstract)
+    retrieval_type = metadata_retrieval_label(query, has_abstract=bool(crossref_abstract))
 
     score = score_candidate(
         claim=claim,
@@ -2706,9 +2760,9 @@ def normalize_crossref_item(item, claim, query, keywords="", source_hint=""):
         "database": "Crossref metadata",
         "retrieval_type": retrieval_type,
         "citation": citation,
-        "doi": fallback.get("doi", "") or info.get("doi", ""),
+        "doi": info.get("doi", ""),
         "pmid": "",
-        "url": fallback.get("url", "") or info.get("url", ""),
+        "url": info.get("url", ""),
         "passage": passage,
         "score": score,
     }
@@ -3608,7 +3662,15 @@ def run_reference_source_workflow(
                     ))
                     continue
 
-                abstract_candidates = [c for c in candidates if is_abstract_backed_candidate(claim, c)]
+                abstract_candidates = [
+                    c for c in prepare_abstract_backed_candidates(
+                        claim,
+                        candidates,
+                        keywords=keywords,
+                        source_hint="",
+                    )
+                    if is_abstract_backed_candidate(claim, c)
+                ]
                 if abstract_candidates:
                     abstract_candidates.sort(
                         key=lambda row: (historical_origin_bonus(row), row.get("score", 0)),
@@ -3633,6 +3695,7 @@ def run_reference_source_workflow(
                             "No exact accessible full text was verified. Returning the best abstract/source-backed candidate with similar wording and conclusion. Use the source link to open the abstract or landing page and reach the full text if available."
                         ),
                         support_focus=statement_type,
+                        evidence_source_type="abstract",
                     ))
 
                     for alt in abstract_candidates[1:4]:
@@ -3653,6 +3716,7 @@ def run_reference_source_workflow(
                             url=alt.get("url", ""),
                             recommendation="Alternative abstract/source match when exact full text is not accessible. Use the source link to open the abstract or landing page and reach the full text if available.",
                             support_focus=statement_type,
+                            evidence_source_type="abstract",
                         ))
                     continue
 
@@ -3672,7 +3736,15 @@ def run_reference_source_workflow(
                 continue
 
         if not relevant_candidates:
-            abstract_candidates = [c for c in candidates if is_abstract_backed_candidate(claim, c)]
+            abstract_candidates = [
+                c for c in prepare_abstract_backed_candidates(
+                    claim,
+                    candidates,
+                    keywords=keywords,
+                    source_hint="",
+                )
+                if is_abstract_backed_candidate(claim, c)
+            ]
             if abstract_candidates:
                 abstract_candidates.sort(
                     key=lambda row: (historical_origin_bonus(row), row.get("score", 0)),
@@ -3695,6 +3767,7 @@ def run_reference_source_workflow(
                     url=best_abstract.get("url", ""),
                     recommendation="No exact accessible full text was verified. Returning the best abstract/source-supported candidate. Use the source link to open the abstract or landing page and reach the full text if available.",
                     support_focus=statement_type,
+                    evidence_source_type="abstract",
                 ))
 
                 for alt in abstract_candidates[1:4]:
@@ -3714,6 +3787,7 @@ def run_reference_source_workflow(
                         url=alt.get("url", ""),
                         recommendation="Alternative abstract/source match when exact full text is not accessible. Use the source link to open the abstract or landing page and reach the full text if available.",
                         support_focus=statement_type,
+                        evidence_source_type="abstract",
                     ))
                 continue
 
