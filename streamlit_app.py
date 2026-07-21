@@ -2280,6 +2280,7 @@ def make_attribution_row(
     section_heading="",
     confidence_level="",
     source_publication_year="",
+    evidence_source_type="",
 ):
     resolved_url = resolve_source_article_url(url=url, doi=doi, pmid=pmid)
     source_location = build_source_location_annotation(
@@ -2323,6 +2324,7 @@ def make_attribution_row(
         "reviewer_note": reviewer_note or "",
         "section_heading": section_heading or "",
         "confidence_level": confidence_level or "",
+        "evidence_source_type": evidence_source_type or ("abstract" if "abstract" in str(retrieval_type).lower() else ""),
         "annotation_format": annotation_format,
         "source_location_display": source_location["source_location"],
         "matched_supporting_text": source_location["matched_supporting_text"],
@@ -2526,7 +2528,7 @@ def fetch_source_record_fallback(doi="", pmid="", fallback_url=""):
     if pmid_text.isdigit():
         queries.append(f"EXT_ID:{pmid_text} AND SRC:MED")
     if doi_norm:
-        queries.append(f'DOI:"{doi_norm}"')
+        queries.append(f"DOI:\"{doi_norm}\"")
 
     for query in queries:
         try:
@@ -2727,12 +2729,7 @@ def normalize_semantic_scholar_item(item, claim, query, keywords="", source_hint
     pubmed_id = external_ids.get("PubMed", "")
     oa_pdf = item.get("openAccessPdf") or {}
     oa_pdf_url = oa_pdf.get("url", "")
-
-    if oa_pdf_url:
-        url = oa_pdf_url
-
-    if not url and pubmed_id:
-        url = f"https://pubmed.ncbi.nlm.nih.gov/{pubmed_id}/"
+    url = oa_pdf_url or url or (f"https://pubmed.ncbi.nlm.nih.gov/{pubmed_id}/" if pubmed_id else "")
 
     citation = f"{author_names}. {title}. {venue}. {year}."
     passage = best_supporting_passage(claim, abstract=abstract)
@@ -4749,7 +4746,7 @@ def render_professional_rows(rows, show_client_check=True):
                     st.markdown(f"**Confidence Level:** {confidence_label}")
                     st.markdown("**Why This Source Was Selected**")
                     st.write(primary.get("recommendation", ""))
-                    passage_label = "Supporting Abstract" if "abstract" in str(primary.get("retrieval_type", "")).lower() else "Supporting Passage"
+                    passage_label = "Supporting Abstract" if primary.get("evidence_source_type", "") == "abstract" else "Supporting Passage"
                     st.markdown(f"**{passage_label}**")
                     if primary.get("supporting_passage"):
                         st.info(primary.get("supporting_passage", ""))
