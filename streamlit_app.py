@@ -2732,8 +2732,6 @@ def normalize_semantic_scholar_item(item, claim, query, keywords="", source_hint
 
     if not url and pubmed_id:
         url = f"https://pubmed.ncbi.nlm.nih.gov/{pubmed_id}/"
-    if not url and oa_pdf.get("url"):
-        url = oa_pdf.get("url")
 
     citation = f"{author_names}. {title}. {venue}. {year}."
     passage = best_supporting_passage(claim, abstract=abstract)
