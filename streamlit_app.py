@@ -2579,6 +2579,10 @@ def fetch_source_record_fallback(doi="", pmid="", fallback_url=""):
     }
 
 
+def metadata_retrieval_label(query, has_abstract=False):
+    return f"Metadata + abstract fallback: {query}" if has_abstract else f"Metadata query: {query}"
+
+
 def openalex_abstract_from_inverted_index(work):
     inverted = work.get("abstract_inverted_index") or {}
     if not inverted:
@@ -2648,9 +2652,7 @@ def normalize_pubmed_item(item, claim, query, keywords="", source_hint=""):
     fallback = fetch_source_record_fallback(doi=doi, pmid=pmid, fallback_url=url)
     abstract = fallback.get("abstract", "")
     passage = best_supporting_passage(claim, abstract=abstract)
-    retrieval_type = f"Metadata query: {query}"
-    if abstract:
-        retrieval_type = f"Metadata + abstract fallback: {query}"
+    retrieval_type = metadata_retrieval_label(query, has_abstract=bool(abstract))
     score = score_candidate(
         claim=claim,
         title=title,
@@ -2685,9 +2687,7 @@ def normalize_crossref_item(item, claim, query, keywords="", source_hint=""):
     )
     abstract = crossref_abstract or fallback.get("abstract", "")
     passage = best_supporting_passage(claim, abstract=abstract)
-    retrieval_type = f"Metadata query: {query}"
-    if abstract:
-        retrieval_type = f"Metadata + abstract fallback: {query}"
+    retrieval_type = metadata_retrieval_label(query, has_abstract=bool(abstract))
 
     score = score_candidate(
         claim=claim,
@@ -2726,9 +2726,10 @@ def normalize_semantic_scholar_item(item, claim, query, keywords="", source_hint
     doi = external_ids.get("DOI", "")
     pubmed_id = external_ids.get("PubMed", "")
     oa_pdf = item.get("openAccessPdf") or {}
+    oa_pdf_url = oa_pdf.get("url", "")
 
-    if oa_pdf.get("url"):
-        url = oa_pdf.get("url")
+    if oa_pdf_url:
+        url = oa_pdf_url
 
     if not url and pubmed_id:
         url = f"https://pubmed.ncbi.nlm.nih.gov/{pubmed_id}/"
