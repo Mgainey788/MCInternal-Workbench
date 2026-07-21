@@ -2519,8 +2519,8 @@ def extract_crossref_abstract(item):
     return clean_text(html_fragment_to_text(raw_abstract))
 
 
-def html_fragment_to_text(value, parser="html.parser"):
-    return BeautifulSoup(str(value or ""), parser).get_text(" ", strip=True)
+def html_fragment_to_text(value):
+    return BeautifulSoup(str(value or ""), "html.parser").get_text(" ", strip=True)
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
@@ -2635,7 +2635,7 @@ def enrich_candidate_with_source_fallback(candidate, claim, keywords="", source_
     return prepared
 
 
-def prepare_abstract_backed_candidates(claim, candidates, keywords="", source_hint="", limit=8):
+def add_abstract_fallbacks_to_candidates(claim, candidates, keywords="", source_hint="", limit=8):
     ranked = sorted(candidates or [], key=lambda row: row.get("score", 0), reverse=True)
     return [
         enrich_candidate_with_source_fallback(
@@ -2646,6 +2646,21 @@ def prepare_abstract_backed_candidates(claim, candidates, keywords="", source_hi
         )
         for candidate in ranked[:limit]
     ]
+
+
+ABSTRACT_SOURCE_LINK_GUIDANCE = "Use the source link to open the abstract or landing page and reach the full text if available."
+STRICT_MODE_ABSTRACT_FALLBACK_RECOMMENDATION = (
+    "No exact accessible full text was verified. Returning the best abstract/source-backed candidate with similar wording and conclusion. "
+    + ABSTRACT_SOURCE_LINK_GUIDANCE
+)
+GENERAL_ABSTRACT_FALLBACK_RECOMMENDATION = (
+    "No exact accessible full text was verified. Returning the best abstract/source-supported candidate. "
+    + ABSTRACT_SOURCE_LINK_GUIDANCE
+)
+ALTERNATIVE_ABSTRACT_FALLBACK_RECOMMENDATION = (
+    "Alternative abstract/source match when exact full text is not accessible. "
+    + ABSTRACT_SOURCE_LINK_GUIDANCE
+)
 
 
 def openalex_abstract_from_inverted_index(work):
@@ -2783,7 +2798,8 @@ def normalize_semantic_scholar_item(item, claim, query, keywords="", source_hint
     pubmed_id = external_ids.get("PubMed", "")
     oa_pdf = item.get("openAccessPdf") or {}
     oa_pdf_url = oa_pdf.get("url", "")
-    url = oa_pdf_url or url or (f"https://pubmed.ncbi.nlm.nih.gov/{pubmed_id}/" if pubmed_id else "")
+    pubmed_url = f"https://pubmed.ncbi.nlm.nih.gov/{pubmed_id}/" if pubmed_id else ""
+    url = oa_pdf_url or url or pubmed_url
 
     citation = f"{author_names}. {title}. {venue}. {year}."
     passage = best_supporting_passage(claim, abstract=abstract)
@@ -3663,7 +3679,7 @@ def run_reference_source_workflow(
                     continue
 
                 abstract_candidates = [
-                    c for c in prepare_abstract_backed_candidates(
+                    c for c in add_abstract_fallbacks_to_candidates(
                         claim,
                         candidates,
                         keywords=keywords,
@@ -3691,9 +3707,7 @@ def run_reference_source_workflow(
                         doi=best_abstract.get("doi", ""),
                         pmid=best_abstract.get("pmid", ""),
                         url=best_abstract.get("url", ""),
-                        recommendation=(
-                            "No exact accessible full text was verified. Returning the best abstract/source-backed candidate with similar wording and conclusion. Use the source link to open the abstract or landing page and reach the full text if available."
-                        ),
+                        recommendation=STRICT_MODE_ABSTRACT_FALLBACK_RECOMMENDATION,
                         support_focus=statement_type,
                         evidence_source_type="abstract",
                     ))
@@ -3714,7 +3728,7 @@ def run_reference_source_workflow(
                             doi=alt.get("doi", ""),
                             pmid=alt.get("pmid", ""),
                             url=alt.get("url", ""),
-                            recommendation="Alternative abstract/source match when exact full text is not accessible. Use the source link to open the abstract or landing page and reach the full text if available.",
+                            recommendation=ALTERNATIVE_ABSTRACT_FALLBACK_RECOMMENDATION,
                             support_focus=statement_type,
                             evidence_source_type="abstract",
                         ))
@@ -3737,7 +3751,7 @@ def run_reference_source_workflow(
 
         if not relevant_candidates:
             abstract_candidates = [
-                c for c in prepare_abstract_backed_candidates(
+                c for c in add_abstract_fallbacks_to_candidates(
                     claim,
                     candidates,
                     keywords=keywords,
@@ -3765,7 +3779,7 @@ def run_reference_source_workflow(
                     doi=best_abstract.get("doi", ""),
                     pmid=best_abstract.get("pmid", ""),
                     url=best_abstract.get("url", ""),
-                    recommendation="No exact accessible full text was verified. Returning the best abstract/source-supported candidate. Use the source link to open the abstract or landing page and reach the full text if available.",
+                    recommendation=GENERAL_ABSTRACT_FALLBACK_RECOMMENDATION,
                     support_focus=statement_type,
                     evidence_source_type="abstract",
                 ))
@@ -3785,7 +3799,7 @@ def run_reference_source_workflow(
                         doi=alt.get("doi", ""),
                         pmid=alt.get("pmid", ""),
                         url=alt.get("url", ""),
-                        recommendation="Alternative abstract/source match when exact full text is not accessible. Use the source link to open the abstract or landing page and reach the full text if available.",
+                        recommendation=ALTERNATIVE_ABSTRACT_FALLBACK_RECOMMENDATION,
                         support_focus=statement_type,
                         evidence_source_type="abstract",
                     ))
