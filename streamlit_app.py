@@ -1,8 +1,14 @@
+"""Primary production app file.
+
+Make all ongoing revisions in this file.
+"""
+
 import io
 import re
 import gc
 import zipfile
 import xml.etree.ElementTree as ET
+from difflib import SequenceMatcher
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -10,7 +16,6 @@ import pandas as pd
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
-from reference_source_claims import select_reference_source_claims
 
 
 try:
@@ -990,6 +995,48 @@ def normalize_doi(text):
     )
 
 
+def canonical_doi_url(doi):
+    doi_clean = normalize_doi(doi)
+    if not doi_clean:
+        return ""
+    return f"https://doi.org/{doi_clean}"
+
+
+def canonical_pubmed_url(pmid):
+    pmid_clean = clean_text(pmid)
+    if not pmid_clean:
+        return ""
+    return f"https://pubmed.ncbi.nlm.nih.gov/{pmid_clean}/"
+
+
+def resolve_source_links(url="", doi="", pmid="", abstract_url=""):
+    """Build resilient source links so users always get at least an abstract/metadata landing page."""
+    primary_url = clean_text(url)
+    abstract_candidate = clean_text(abstract_url)
+    doi_url = canonical_doi_url(doi)
+    pmid_url = canonical_pubmed_url(pmid)
+
+    if not abstract_candidate:
+        abstract_candidate = pmid_url or doi_url or primary_url
+
+    if not primary_url:
+        primary_url = abstract_candidate
+
+    return primary_url, abstract_candidate
+
+
+def to_clickable_url(value):
+    """Normalize table cells into clickable URLs when possible."""
+    text = clean_text(value)
+    if not text:
+        return ""
+    if re.match(r"^https?://", text, flags=re.IGNORECASE):
+        return text
+    if re.match(r"^10\.\d{4,9}/", text, flags=re.IGNORECASE):
+        return canonical_doi_url(text)
+    return text
+
+
 def _annotation_int(value):
     try:
         if value is None or value == "":
@@ -1247,26 +1294,6 @@ def get_best_oa_url(unpaywall_info):
     return location.get("url") or location.get("url_for_pdf") or ""
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
-def resolve_source_article_url(url="", doi="", pmid=""):
-    direct_url = str(url or "").strip()
-    if direct_url.startswith(("http://", "https://")):
-        return direct_url
-
-    doi_norm = normalize_doi(doi)
-    if doi_norm:
-        oa_url = get_best_oa_url(check_unpaywall(doi_norm))
-        if oa_url:
-            return oa_url
-        return f"https://doi.org/{doi_norm}"
-
-    pmid_text = str(pmid or "").strip()
-    if pmid_text.isdigit():
-        return f"https://pubmed.ncbi.nlm.nih.gov/{pmid_text}/"
-
-    return ""
-
-
 # =========================================================
 # FILE EXTRACTION
 # =========================================================
@@ -1449,6 +1476,49 @@ def normalize_for_exact_match(text):
     return re.sub(r"\s+", " ", clean_text(text or "").lower()).strip()
 
 
+def has_near_perfect_claim_match(claim, target_text, min_ratio=0.92):
+    """Detect almost-identical wording even when punctuation or a few words differ."""
+    claim_norm = normalize_for_exact_match(claim)
+    target_norm = normalize_for_exact_match(target_text)
+
+    if not claim_norm or not target_norm:
+        return False
+
+    claim_words = claim_norm.split()
+    if len(claim_words) < 8:
+        return False
+
+    claim_len = len(claim_words)
+    sentence_candidates = [
+        normalize_for_exact_match(chunk)
+        for chunk in re.split(r"(?<=[.!?])\s+", target_norm)
+    ]
+    sentence_candidates = [s for s in sentence_candidates if s]
+    if not sentence_candidates:
+        sentence_candidates = [target_norm]
+
+    for sentence in sentence_candidates[:80]:
+        sentence_words = sentence.split()
+        if not sentence_words:
+            continue
+
+        # Coarse lexical gate first to keep fuzzy checks efficient and precise.
+        if term_overlap_score(claim_norm, sentence) < 60:
+            continue
+
+        if SequenceMatcher(None, claim_norm, sentence).ratio() >= min_ratio:
+            return True
+
+        if len(sentence_words) >= claim_len:
+            max_windows = min(len(sentence_words) - claim_len + 1, 60)
+            for idx in range(max_windows):
+                window_text = " ".join(sentence_words[idx: idx + claim_len])
+                if SequenceMatcher(None, claim_norm, window_text).ratio() >= min_ratio:
+                    return True
+
+    return False
+
+
 def has_exact_claim_match(claim, target_text):
     """True when claim wording (or a long phrase from it) appears in target text."""
     claim_norm = normalize_for_exact_match(claim)
@@ -1466,6 +1536,9 @@ def has_exact_claim_match(claim, target_text):
         phrase_norm = normalize_for_exact_match(phrase)
         if phrase_norm and phrase_norm in target_norm:
             return True
+
+    if has_near_perfect_claim_match(claim_norm, target_norm, min_ratio=0.92):
+        return True
 
     return False
 
@@ -1590,6 +1663,7 @@ def trace_source_via_references(claim_text, seed_candidates, keywords="", use_se
         "doi": best.get("doi", ""),
         "pmid": best.get("pmid", ""),
         "url": best.get("url", ""),
+        "abstract_url": best.get("abstract_url", ""),
         "recommendation": "Direct evidence was found after tracing references from a related source. Prefer this older/original source over newer discussion articles.",
     }
 
@@ -1697,6 +1771,7 @@ def resolve_exact_source_quote(claim_text, keywords="", use_semantic_scholar=Fal
         "doi": best.get("doi", ""),
         "pmid": best.get("pmid", ""),
         "url": best.get("url", ""),
+        "abstract_url": best.get("abstract_url", ""),
         "recommendation": f"{best.get('match_type', 'Exact match')} identified before broad ranking. Use this as the primary source.",
     }
 
@@ -2281,8 +2356,8 @@ def make_attribution_row(
     section_heading="",
     confidence_level="",
     source_publication_year="",
+    abstract_url="",
 ):
-    resolved_url = resolve_source_article_url(url=url, doi=doi, pmid=pmid)
     source_location = build_source_location_annotation(
         reference_name=citation or article_title,
         claim_text=claim,
@@ -2299,6 +2374,12 @@ def make_attribution_row(
         paragraph_number=paragraph_number,
         source_publication_year=source_publication_year,
     )
+    resolved_url, resolved_abstract_url = resolve_source_links(
+        url=url,
+        doi=doi,
+        pmid=pmid,
+        abstract_url=abstract_url,
+    )
 
     return {
         "workflow": workflow,
@@ -2314,6 +2395,7 @@ def make_attribution_row(
         "doi": doi or "",
         "pmid": pmid or "",
         "url": resolved_url,
+        "abstract_url": resolved_abstract_url,
         "client_source": client_source or "",
         "recommendation": recommendation or "",
         "page_number": page_number,
@@ -2531,9 +2613,10 @@ def normalize_europe_pmc_item(item, claim, query, keywords="", source_hint=""):
     if pmcid:
         url = f"https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/"
     elif pmid:
-        url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+        url = canonical_pubmed_url(pmid)
     else:
         url = ""
+    url, abstract_url = resolve_source_links(url=url, doi=doi, pmid=pmid)
 
     citation = f"{authors}. {title}. {journal}. {year}."
     passage = best_supporting_passage(claim, abstract=abstract)
@@ -2555,6 +2638,7 @@ def normalize_europe_pmc_item(item, claim, query, keywords="", source_hint=""):
         "doi": doi,
         "pmid": pmid,
         "url": url,
+        "abstract_url": abstract_url,
         "passage": passage,
         "score": score,
     }
@@ -2566,6 +2650,7 @@ def normalize_pubmed_item(item, claim, query, keywords="", source_hint=""):
     url = item.get("url", "")
     pmid_match = re.search(r"pubmed\.ncbi\.nlm\.nih\.gov/(\d+)/", url or "")
     pmid = pmid_match.group(1) if pmid_match else ""
+    url, abstract_url = resolve_source_links(url=url, doi=item.get("doi", ""), pmid=pmid)
     score = score_candidate(
         claim=claim,
         title=title,
@@ -2584,6 +2669,7 @@ def normalize_pubmed_item(item, claim, query, keywords="", source_hint=""):
         "doi": item.get("doi", ""),
         "pmid": pmid,
         "url": url,
+        "abstract_url": abstract_url,
         "passage": "",
         "score": score,
     }
@@ -2603,6 +2689,7 @@ def normalize_crossref_item(item, claim, query, keywords="", source_hint=""):
         keywords=keywords,
         source_hint=source_hint,
     )
+    url, abstract_url = resolve_source_links(url=info.get("url", ""), doi=info.get("doi", ""), pmid="")
 
     return {
         "title": title,
@@ -2611,7 +2698,8 @@ def normalize_crossref_item(item, claim, query, keywords="", source_hint=""):
         "citation": citation,
         "doi": info.get("doi", ""),
         "pmid": "",
-        "url": info.get("url", ""),
+        "url": url,
+        "abstract_url": abstract_url,
         "passage": "",
         "score": score,
     }
@@ -2622,7 +2710,8 @@ def normalize_semantic_scholar_item(item, claim, query, keywords="", source_hint
     abstract = clean_text(item.get("abstract", ""))
     venue = clean_text(item.get("venue", ""))
     year = item.get("year", "")
-    url = item.get("url", "")
+    semantic_url = item.get("url", "")
+    url = semantic_url
 
     authors = item.get("authors", []) or []
     author_names = ", ".join([a.get("name", "") for a in authors[:4] if a.get("name")])
@@ -2631,12 +2720,16 @@ def normalize_semantic_scholar_item(item, claim, query, keywords="", source_hint
     doi = external_ids.get("DOI", "")
     pubmed_id = external_ids.get("PubMed", "")
 
-    if not url and pubmed_id:
-        url = f"https://pubmed.ncbi.nlm.nih.gov/{pubmed_id}/"
-
     oa_pdf = item.get("openAccessPdf") or {}
-    if not url and oa_pdf.get("url"):
+    if oa_pdf.get("url"):
         url = oa_pdf.get("url")
+
+    url, abstract_url = resolve_source_links(
+        url=url,
+        doi=doi,
+        pmid=pubmed_id,
+        abstract_url=semantic_url,
+    )
 
     citation = f"{author_names}. {title}. {venue}. {year}."
     passage = best_supporting_passage(claim, abstract=abstract)
@@ -2661,6 +2754,7 @@ def normalize_semantic_scholar_item(item, claim, query, keywords="", source_hint
         "doi": doi,
         "pmid": pubmed_id,
         "url": url,
+        "abstract_url": abstract_url,
         "passage": passage,
         "score": score,
     }
@@ -2686,7 +2780,8 @@ def normalize_openalex_item(item, claim, query, keywords="", source_hint=""):
             author_names.append(author.get("display_name"))
 
     author_string = ", ".join(author_names)
-    url = item.get("doi") or item.get("id") or ""
+    work_id = item.get("id") or ""
+    url = item.get("doi") or work_id or ""
 
     open_access = item.get("open_access") or {}
     oa_url = open_access.get("oa_url", "")
@@ -2711,6 +2806,8 @@ def normalize_openalex_item(item, claim, query, keywords="", source_hint=""):
     if source_type == "metadata":
         score = min(score + 8, 69.9)
 
+    url, abstract_url = resolve_source_links(url=url, doi=doi, pmid="", abstract_url=work_id)
+
     return {
         "title": title,
         "database": "OpenAlex",
@@ -2719,6 +2816,7 @@ def normalize_openalex_item(item, claim, query, keywords="", source_hint=""):
         "doi": doi,
         "pmid": "",
         "url": url,
+        "abstract_url": abstract_url,
         "passage": passage,
         "score": score,
     }
@@ -2767,6 +2865,7 @@ def normalize_core_item(item, claim, query, keywords="", source_hint=""):
         keywords=keywords,
         source_hint=source_hint,
     )
+    url, abstract_url = resolve_source_links(url=url, doi=doi, pmid=pmid)
 
     return {
         "title": title,
@@ -2776,6 +2875,7 @@ def normalize_core_item(item, claim, query, keywords="", source_hint=""):
         "doi": doi,
         "pmid": pmid,
         "url": url,
+        "abstract_url": abstract_url,
         "passage": passage,
         "score": score,
     }
@@ -3202,10 +3302,7 @@ def render_semantic_fact_check_result(result: dict):
                 expanded=(rank_i == 1),
             ):
                 st.write(f"**Source:** {p.get('source_name', '')}")
-                if p.get("doi"):
-                    st.write(f"**DOI:** {p['doi']}")
-                if p.get("pmid"):
-                    st.write(f"**PMID:** {p['pmid']}")
+                _show_source_link("", p.get("doi", ""), p.get("pmid", ""))
                 if p.get("doi_matched"):
                     st.success("DOI matched provided citation")
                 st.markdown("**Supporting Text:**")
@@ -3337,6 +3434,7 @@ def run_attribution_workflow(
                 doi=best.get("doi", ""),
                 pmid=best.get("pmid", ""),
                 url=best.get("url", ""),
+                abstract_url=best.get("abstract_url", ""),
                 client_source=client_source,
                 recommendation=recommendation,
                 reviewer_note=client_check.get("rejection_reason", ""),
@@ -3360,6 +3458,7 @@ def run_attribution_workflow(
                     doi=alt.get("doi", ""),
                     pmid=alt.get("pmid", ""),
                     url=alt.get("url", ""),
+                    abstract_url=alt.get("abstract_url", ""),
                     client_source=client_source,
                     recommendation="Alternative clue only. Use only if primary result is insufficient.",
                     confidence_level=confidence_level_label(alt.get("score", 0)),
@@ -3394,12 +3493,10 @@ def run_reference_source_workflow(
     use_openalex=False,
     fast_mode=True,
     citation_qa_first=True,
-    split_claims=True,
 ):
     """
     Find Reference Source workflow.
     Citation-like requests are resolved first so the app does not detour into broad opioid/literature results.
-    Set split_claims=False for claim-box paste flows that should be treated as one claim unit.
     """
     combined_input = f"{content or ''} {keywords or ''}".strip()
 
@@ -3417,12 +3514,9 @@ def run_reference_source_workflow(
                 )
             ]
 
-    claims = select_reference_source_claims(
-        content=content,
-        max_claims=max_claims,
-        split_claims=split_claims,
-        split_into_claims=split_into_claims,
-    )
+    claims = split_into_claims(content, max_claims=max_claims)
+    if not claims and content.strip():
+        claims = [content.strip()]
 
     output_rows = []
 
@@ -3450,6 +3544,7 @@ def run_reference_source_workflow(
                 doi=known_exact.get("doi", ""),
                 pmid=known_exact.get("pmid", ""),
                 url=known_exact.get("url", ""),
+                abstract_url=known_exact.get("abstract_url", ""),
                 recommendation=known_exact.get("recommendation", ""),
                 support_focus=statement_type,
             ))
@@ -3515,6 +3610,7 @@ def run_reference_source_workflow(
                         doi=traced.get("doi", ""),
                         pmid=traced.get("pmid", ""),
                         url=traced.get("url", ""),
+                        abstract_url=traced.get("abstract_url", ""),
                         recommendation=traced.get("recommendation", ""),
                         support_focus=statement_type,
                     ))
@@ -3541,13 +3637,14 @@ def run_reference_source_workflow(
                         doi=best_abstract.get("doi", ""),
                         pmid=best_abstract.get("pmid", ""),
                         url=best_abstract.get("url", ""),
+                        abstract_url=best_abstract.get("abstract_url", ""),
                         recommendation=(
                             "No exact accessible full text was verified. Returning the best abstract/source-backed candidate with similar wording and conclusion."
                         ),
                         support_focus=statement_type,
                     ))
 
-                    for alt in abstract_candidates[1:4]:
+                    for alt in abstract_candidates[1:11]:
                         alt_status = "Alternative abstract/source match"
                         output_rows.append(make_attribution_row(
                             workflow="Alternative source clue",
@@ -3563,6 +3660,7 @@ def run_reference_source_workflow(
                             doi=alt.get("doi", ""),
                             pmid=alt.get("pmid", ""),
                             url=alt.get("url", ""),
+                            abstract_url=alt.get("abstract_url", ""),
                             recommendation="Alternative abstract/source match when exact full text is not accessible.",
                             support_focus=statement_type,
                         ))
@@ -3605,11 +3703,12 @@ def run_reference_source_workflow(
                     doi=best_abstract.get("doi", ""),
                     pmid=best_abstract.get("pmid", ""),
                     url=best_abstract.get("url", ""),
+                    abstract_url=best_abstract.get("abstract_url", ""),
                     recommendation="No exact accessible full text was verified. Returning the best abstract/source-supported candidate.",
                     support_focus=statement_type,
                 ))
 
-                for alt in abstract_candidates[1:4]:
+                for alt in abstract_candidates[1:11]:
                     output_rows.append(make_attribution_row(
                         workflow="Alternative source clue",
                         claim_number=claim_number,
@@ -3624,6 +3723,7 @@ def run_reference_source_workflow(
                         doi=alt.get("doi", ""),
                         pmid=alt.get("pmid", ""),
                         url=alt.get("url", ""),
+                        abstract_url=alt.get("abstract_url", ""),
                         recommendation="Alternative abstract/source match when exact full text is not accessible.",
                         support_focus=statement_type,
                     ))
@@ -3669,11 +3769,12 @@ def run_reference_source_workflow(
             doi=best.get("doi", ""),
             pmid=best.get("pmid", ""),
             url=best.get("url", ""),
+            abstract_url=best.get("abstract_url", ""),
             recommendation=recommendation,
             support_focus=statement_type,
         ))
 
-        for alt in ranked_candidates[1:4]:
+        for alt in ranked_candidates[1:11]:
             alt_status = attribution_status(alt.get("score", 0), alt.get("passage", ""), claim=claim)
             output_rows.append(make_attribution_row(
                 workflow="Alternative source clue",
@@ -3689,6 +3790,7 @@ def run_reference_source_workflow(
                 doi=alt.get("doi", ""),
                 pmid=alt.get("pmid", ""),
                 url=alt.get("url", ""),
+                abstract_url=alt.get("abstract_url", ""),
                 recommendation="Alternative match. Use only if it directly supports the statement wording.",
                 support_focus=statement_type,
             ))
@@ -4478,17 +4580,42 @@ def _show_status(status):
         st.error(status)
 
 
-def _show_source_link(url, doi="", pmid=""):
-    resolved_url = resolve_source_article_url(url=url, doi=doi, pmid=pmid)
+def _show_source_link(url, doi="", pmid="", abstract_url=""):
+    primary_url, abstract_link = resolve_source_links(url=url, doi=doi, pmid=pmid, abstract_url=abstract_url)
+
     link_items = []
-    if doi:
-        link_items.append(f"**DOI:** {doi}")
-    if pmid:
-        link_items.append(f"**PMID:** {pmid}")
-    if resolved_url:
-        link_items.append(f"[Open Source Article]({resolved_url})")
+    doi_url = canonical_doi_url(doi)
+    pmid_url = canonical_pubmed_url(pmid)
+
+    if primary_url:
+        link_items.append(f"[Open Source Article]({primary_url})")
+    if abstract_link and abstract_link != primary_url:
+        link_items.append(f"[Open Abstract / Metadata]({abstract_link})")
+    if doi_url:
+        link_items.append(f"[DOI]({doi_url})")
+    if pmid_url:
+        link_items.append(f"[PMID]({pmid_url})")
+
     if link_items:
         st.markdown(" | ".join(link_items))
+
+
+def render_clickable_dataframe(df, **kwargs):
+    """Render dataframes with clickable link columns across tabs/logs."""
+    if isinstance(df, pd.DataFrame):
+        display_df = df.copy()
+    else:
+        display_df = pd.DataFrame(df)
+
+    link_columns = [col for col in ["url", "abstract_url", "best_oa_url"] if col in display_df.columns]
+    for col in link_columns:
+        display_df[col] = display_df[col].apply(to_clickable_url)
+
+    column_config = kwargs.pop("column_config", {}) or {}
+    for col in link_columns:
+        column_config[col] = st.column_config.LinkColumn(col, display_text="Open")
+
+    st.dataframe(display_df, column_config=column_config, **kwargs)
 
 
 def render_professional_rows(rows, show_client_check=True):
@@ -4585,7 +4712,7 @@ def render_professional_rows(rows, show_client_check=True):
                         rank_table["Suggested Annotation"] = "-"
 
                     st.markdown("**Supporting Locations (Top 5)**")
-                    st.dataframe(
+                    render_clickable_dataframe(
                         rank_table[["Rank", "Source Location", "Score", "Section", "Annotation Format", "Suggested Annotation"]],
                         use_container_width=True,
                         hide_index=True,
@@ -4663,12 +4790,17 @@ def render_professional_rows(rows, show_client_check=True):
                         st.info(primary.get("supporting_passage", ""))
                     else:
                         st.warning("No direct supporting passage returned. This should be treated as supporting evidence only, not definitive original-source proof.")
-                    _show_source_link(primary.get("url", ""), primary.get("doi", ""), primary.get("pmid", ""))
+                    _show_source_link(
+                        primary.get("url", ""),
+                        primary.get("doi", ""),
+                        primary.get("pmid", ""),
+                        primary.get("abstract_url", ""),
+                    )
 
         alt_rows = group[group["workflow"] == "Alternative source clue"]
         if not alt_rows.empty:
             with st.expander("View alternative source clues"):
-                for _, alt in alt_rows.sort_values("score", ascending=False).head(4).iterrows():
+                for _, alt in alt_rows.sort_values("score", ascending=False).head(12).iterrows():
                     st.markdown(f"**{alt.get('article_title', '')}**")
                     st.caption(
                         f"{alt.get('source_status', '')} | "
@@ -4678,7 +4810,12 @@ def render_professional_rows(rows, show_client_check=True):
                     st.write(f"Match type: {match_type_label(alt.get('claim', ''), alt.get('supporting_passage', ''))}")
                     if alt.get("supporting_passage"):
                         st.write(alt.get("supporting_passage"))
-                    _show_source_link(alt.get("url", ""), alt.get("doi", ""), alt.get("pmid", ""))
+                    _show_source_link(
+                        alt.get("url", ""),
+                        alt.get("doi", ""),
+                        alt.get("pmid", ""),
+                        alt.get("abstract_url", ""),
+                    )
                     st.divider()
 
     return df
@@ -4966,16 +5103,9 @@ def render_direct_citation_answer(result):
             st.markdown("#### Cleaned-Up Reference")
             st.success(result.get("clean_reference", ""))
 
-        source_links = []
-        if result.get("doi"):
-            source_links.append(f"**DOI:** {result.get('doi')}")
+        _show_source_link(result.get("url", ""), result.get("doi", ""), result.get("pmid", ""))
         if result.get("isbn"):
-            source_links.append(f"**ISBN:** {result.get('isbn')}")
-        if result.get("url"):
-            source_links.append(f"[Open Authoritative Source]({result.get('url')})")
-
-        if source_links:
-            st.markdown(" | ".join(source_links))
+            st.markdown(f"**ISBN:** {result.get('isbn')}")
 
         if result.get("recommendation"):
             st.markdown("#### Recommendation")
@@ -5011,7 +5141,9 @@ def citation_qa_to_log_row(result, claim_text="", reference_text=""):
         "supporting_passage": supporting,
         "citation": result.get("correct_source", ""),
         "doi": result.get("doi", ""),
+        "pmid": result.get("pmid", ""),
         "url": result.get("url", ""),
+        "abstract_url": resolve_source_links(result.get("url", ""), result.get("doi", ""), result.get("pmid", ""))[1],
         "client_source": reference_text,
         "recommendation": result.get("recommendation", ""),
         "annotation_format": annotation_format,
@@ -5952,7 +6084,6 @@ with tab_source:
                             use_openalex=source_openalex,
                             fast_mode=(source_mode == "Fast"),
                             citation_qa_first=True,
-                            split_claims=False,
                         )
                         for row in claim_rows:
                             row["claim_number"] = idx
@@ -5964,7 +6095,7 @@ with tab_source:
             df = render_professional_rows(rows, show_client_check=False)
 
             with st.expander("View / download full table"):
-                st.dataframe(df, use_container_width=True)
+                render_clickable_dataframe(df, use_container_width=True)
                 st.download_button(
                     "Download Reference Source CSV",
                     data=df.to_csv(index=False).encode("utf-8"),
@@ -6157,7 +6288,7 @@ with tab_factcheck:
 
                 df = pd.DataFrame(rows)
                 with st.expander("View / download Citation QA table"):
-                    st.dataframe(df, use_container_width=True)
+                    render_clickable_dataframe(df, use_container_width=True)
                     st.download_button(
                         "Download Citation QA CSV",
                         data=df.to_csv(index=False).encode("utf-8"),
@@ -6186,7 +6317,7 @@ with tab_factcheck:
                     evidence_df = render_professional_rows(evidence_rows, show_client_check=True)
 
                     with st.expander("View / download additional evidence table"):
-                        st.dataframe(evidence_df, use_container_width=True)
+                        render_clickable_dataframe(evidence_df, use_container_width=True)
                         st.download_button(
                             "Download Additional Evidence CSV",
                             data=evidence_df.to_csv(index=False).encode("utf-8"),
@@ -6213,7 +6344,7 @@ with tab_factcheck:
                 df = render_professional_rows(rows, show_client_check=True)
 
                 with st.expander("View / download full table"):
-                    st.dataframe(df, use_container_width=True)
+                    render_clickable_dataframe(df, use_container_width=True)
                     st.download_button(
                         "Download Fact Check CSV",
                         data=df.to_csv(index=False).encode("utf-8"),
@@ -6267,6 +6398,13 @@ with tab_local:
         key=reset_key("local_keywords"),
     )
 
+    pasted_article_text = st.text_area(
+        "Or paste full-text source content",
+        height=180,
+        placeholder="Paste article or guideline text here if you are not uploading a file...",
+        key=reset_key("local_article_text"),
+    )
+
     local_results_per_claim = st.slider(
         "Results to show",
         1,
@@ -6275,10 +6413,12 @@ with tab_local:
         key="local_results_per_claim"
     )
 
-    # Allow run if: (files uploaded AND gate passed) OR (no files AND claim/keywords exist)
+    # Allow run when a source is available and claim/search text is provided.
     has_files = uploaded_articles is not None and len(uploaded_articles) > 0
+    has_pasted_source = bool(pasted_article_text.strip())
+    has_local_source = has_files or has_pasted_source
     has_search_content = local_claim_content.strip() or local_keywords.strip()
-    can_run_local = (has_files and local_gate_ready) or (not has_files and has_search_content)
+    can_run_local = has_search_content and ((has_files and local_gate_ready) or (not has_files and has_pasted_source))
     
     run_local = st.button(
         "Search Uploaded Full Text",
@@ -6291,28 +6431,30 @@ with tab_local:
 
     if run_local:
         append_compliance_audit_event("local", "run_search", local_gate_report)
-        if not uploaded_articles:
-            st.warning("Please upload at least one full-text PDF or TXT file.")
+        if not has_local_source:
+            st.warning("Please upload a full-text PDF/TXT file or paste full-text content.")
         elif not local_claim_content.strip() and not local_keywords.strip():
             st.warning("Please paste a statement, reference, phrase, or keyword to search for.")
+        elif has_files and not local_gate_ready:
+            st.warning("Please complete the required rights gate for uploaded files before searching.")
         else:
             local_search_content = local_claim_content.strip() if local_claim_content.strip() else local_keywords.strip()
             claims = split_into_claims(local_search_content, max_claims=1)
             if not claims and local_search_content:
                 claims = [local_search_content]
 
-            with st.spinner("Searching inside uploaded full text..."):
+            with st.spinner("Searching inside provided full text..."):
                 rows = search_uploaded_article_library(
                     claims=claims,
                     uploaded_article_files=uploaded_articles,
-                    article_text_box="",
+                    article_text_box=pasted_article_text,
                     keywords=local_keywords,
                     max_results_per_claim=local_results_per_claim,
                 )
 
             st.session_state.local_full_text_last_results = rows
             st.session_state.local_full_text_log.extend(sanitize_rows_for_log(rows))
-            clear_transient_processing_memory(["local_article_upload", "local_claim_content", "local_keywords"])
+            clear_transient_processing_memory(["local_article_upload", "local_claim_content", "local_keywords", "local_article_text"])
 
     if st.session_state.local_full_text_last_results:
         st.subheader("Uploaded Full-Text Search Results")
@@ -6320,7 +6462,7 @@ with tab_local:
         df = render_professional_rows(local_rows, show_client_check=False)
 
         with st.expander("View / download full-text search table"):
-            st.dataframe(df, use_container_width=True)
+            render_clickable_dataframe(df, use_container_width=True)
             st.download_button(
                 "Download Full-Text Search CSV",
                 data=df.to_csv(index=False).encode("utf-8"),
@@ -6749,11 +6891,11 @@ with tab_screening:
                         {"PRISMA-style item": "Maybe / insufficient information", "Count": int((screening_df["Suggested decision"] == "Maybe / insufficient information").sum())},
                         {"PRISMA-style item": "Exclude / likely not relevant", "Count": int((screening_df["Suggested decision"] == "Exclude / likely not relevant").sum())},
                     ])
-                    st.dataframe(prisma_rows, use_container_width=True)
-                st.dataframe(counts, use_container_width=True)
+                    render_clickable_dataframe(prisma_rows, use_container_width=True)
+                render_clickable_dataframe(counts, use_container_width=True)
 
                 st.markdown("### Reviewer Screening Results")
-                st.dataframe(screening_df, use_container_width=True)
+                render_clickable_dataframe(screening_df, use_container_width=True)
 
                 st.download_button(
                     "Download Screening CSV",
@@ -6776,7 +6918,7 @@ with tab_screening:
                     strategy_seed = " ".join([pubmed_query, inclusion_criteria])
                     strategy = build_search_strategy(strategy_seed or screening_text[:1000], "PubMed")
                     pico_df = pd.DataFrame([{"Concept": k, "Terms": v} for k, v in strategy["pico"].items()])
-                    st.dataframe(pico_df, use_container_width=True)
+                    render_clickable_dataframe(pico_df, use_container_width=True)
                     st.markdown("**Suggested PubMed-style string**")
                     st.code(strategy["database_string"])
                     st.info("Review and refine with the project scientist/librarian before final database execution.")
@@ -6801,7 +6943,7 @@ with tab_strategy:
             strategy = build_search_strategy(strategy_question, strategy_database)
             st.markdown("### PICO / Concept Breakdown")
             pico_df = pd.DataFrame([{"Concept": k, "Terms": v} for k, v in strategy["pico"].items()])
-            st.dataframe(pico_df, use_container_width=True)
+            render_clickable_dataframe(pico_df, use_container_width=True)
             st.markdown("### Suggested Keywords / Concepts")
             st.write(", ".join(strategy["keywords"]))
             st.markdown("### Boolean String")
@@ -6818,7 +6960,7 @@ with tab_history:
     st.subheader("Reference Source Log")
     if st.session_state.reference_source_log:
         df = pd.DataFrame(st.session_state.reference_source_log)
-        st.dataframe(df, use_container_width=True)
+        render_clickable_dataframe(df, use_container_width=True)
         st.download_button(
             "Download Reference Source Log",
             data=df.to_csv(index=False).encode("utf-8"),
@@ -6831,7 +6973,7 @@ with tab_history:
     st.subheader("Fact Check Source Log")
     if st.session_state.fact_check_log:
         df = pd.DataFrame(st.session_state.fact_check_log)
-        st.dataframe(df, use_container_width=True)
+        render_clickable_dataframe(df, use_container_width=True)
         st.download_button(
             "Download Fact Check Log",
             data=df.to_csv(index=False).encode("utf-8"),
@@ -6844,7 +6986,7 @@ with tab_history:
     st.subheader("Local Full-Text Search Log")
     if st.session_state.local_full_text_log:
         df = pd.DataFrame(st.session_state.local_full_text_log)
-        st.dataframe(df, use_container_width=True)
+        render_clickable_dataframe(df, use_container_width=True)
         st.download_button(
             "Download Local Full-Text Log",
             data=df.to_csv(index=False).encode("utf-8"),
@@ -6857,7 +6999,7 @@ with tab_history:
     st.subheader("Copyright Log")
     if st.session_state.copyright_log:
         df = pd.DataFrame(st.session_state.copyright_log)
-        st.dataframe(df, use_container_width=True)
+        render_clickable_dataframe(df, use_container_width=True)
         st.download_button(
             "Download Copyright Log",
             data=df.to_csv(index=False).encode("utf-8"),
@@ -6870,7 +7012,7 @@ with tab_history:
     st.subheader("Compliance Audit Log")
     if st.session_state.compliance_audit_log:
         df = pd.DataFrame(st.session_state.compliance_audit_log)
-        st.dataframe(df, use_container_width=True)
+        render_clickable_dataframe(df, use_container_width=True)
         st.download_button(
             "Download Compliance Audit Log",
             data=df.to_csv(index=False).encode("utf-8"),
@@ -6892,3 +7034,4 @@ if st.button("Clear Session Data"):
 
     st.success("Session data cleared.")
     st.rerun()
+
