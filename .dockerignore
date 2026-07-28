@@ -6,10 +6,6 @@
 __pycache__/
 *.pyc
 *.pyo
-ngrok*
-cloudflared
-refresh_public_tunnel.sh
-load_balancer.py
 *.zip
 *.md
 LICENSE

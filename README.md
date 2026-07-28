@@ -9,8 +9,7 @@ This repository contains a Streamlit-based scientific reference QA application f
 
 ## ✏️ How to Edit and Deploy
 
-**One rule:** only edit `streamlit_app.py`. That is the file both Azure and Streamlit Cloud deploy.  
-The `streamlit_app_Version*.py` files are archived snapshots — editing them has no effect on the live app.
+**One rule:** only edit `streamlit_app.py`. That is the file both Azure and Streamlit Cloud deploy.
 
 ### Edit → Deploy Workflow
 
@@ -29,7 +28,7 @@ Compare that SHA against the commit you just pushed. If they match, your changes
 If the Azure UI still shows old content, do a hard-refresh (`Ctrl+Shift+R`) or restart the App Service.
 
 ### Manual deploy
-Both workflows also support **workflow_dispatch** — go to **GitHub → Actions → (workflow name) → Run workflow** to trigger a deploy without pushing new code.
+The deployment workflow supports **workflow_dispatch** — go to **GitHub → Actions → Build and deploy Python app to Azure Web App - MCInternalWorkbench → Run workflow** to trigger a deploy without pushing new code.
 
 ---
 
@@ -49,28 +48,6 @@ Run locally:
    ```bash
    streamlit run streamlit_app.py
    ```
-
-## Load-Balanced Run Mode
-The repository now supports local load balancing for Streamlit replicas using `load_balancer.py`.
-
-Run with the existing tunnel script (load balancing enabled by default):
-
-```bash
-./refresh_public_tunnel.sh
-```
-
-Optional environment variables:
-
-- `ENABLE_LOAD_BALANCING=1` enables the balancer (`0` keeps single-instance mode).
-- `STREAMLIT_REPLICAS=2` sets number of Streamlit replicas.
-- `STREAMLIT_BASE_PORT=8601` sets first replica port.
-- `TUNNEL_PROVIDER=cloudflared` or `TUNNEL_PROVIDER=localhostrun` selects tunnel backend.
-
-In load-balanced mode:
-
-- Streamlit replicas run on `STREAMLIT_BASE_PORT` and upward.
-- `load_balancer.py` binds to port `8501` and routes requests across healthy replicas.
-- Sticky cookies are used to keep browser sessions on one backend when possible.
 
 ## Future Enhancement Roadmap
 The future-state platform requirements and phased implementation plan are documented in:
