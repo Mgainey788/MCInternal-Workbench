@@ -2,7 +2,12 @@
 
 Make all ongoing revisions in this file.
 """
+st.set_page_config(
+    page_title="Source Attribution & Copyright QA",
+    layout="wide"
+)
 
+st.caption("DEPLOY MARKER: 2026-07-28 13:40 UTC / build v17")
 import io
 import re
 import gc
