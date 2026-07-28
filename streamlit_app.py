@@ -295,6 +295,9 @@ st.markdown(
 if "privacy_ack_confirmed" not in st.session_state:
     st.session_state.privacy_ack_confirmed = False
 
+if "display_theme_mode" not in st.session_state:
+    st.session_state.display_theme_mode = "System"
+
 
 
 # =========================================================
@@ -309,6 +312,12 @@ if "privacy_ack_confirmed" not in st.session_state:
 
 with st.sidebar:
     st.markdown("## Tool Guide")
+    st.selectbox(
+        "Display theme",
+        options=["System", "Light", "Dark"],
+        key="display_theme_mode",
+        help="System follows your device setting. Light and Dark force a mode.",
+    )
     if st.session_state.get("privacy_ack_confirmed", False):
         st.success("Privacy acknowledgement confirmed for this session.")
     else:
@@ -927,6 +936,129 @@ st.markdown(
 """,
     unsafe_allow_html=True,
 )
+
+# Dark-mode accessibility overrides to preserve text contrast and readability.
+_dark_mode_css_core = """
+    .stApp,
+    .main {
+        background: linear-gradient(180deg, #0b1220 0%, #111827 100%) !important;
+        color: #e5e7eb !important;
+    }
+
+    .mc-card,
+    .mc-result,
+    .metric-card,
+    .result-card,
+    .mc-evidence,
+    .evidence-box,
+    .privacy-banner,
+    .stTextInput input,
+    .stTextArea textarea,
+    .stTabs [data-baseweb="tab"] {
+        background: #1f2937 !important;
+        color: #e5e7eb !important;
+        border-color: #334155 !important;
+    }
+
+    .mc-card h3,
+    .source-title,
+    .privacy-banner h4,
+    .streamlit-expanderHeader {
+        color: #f8fafc !important;
+    }
+
+    .mc-card p,
+    .source-meta,
+    .small-label,
+    .secure-caption,
+    .qa-hero p {
+        color: #cbd5e1 !important;
+    }
+
+    .stTabs [aria-selected="true"] {
+        background: #2563eb !important;
+        color: #ffffff !important;
+        border-color: #2563eb !important;
+    }
+
+    .stButton > button {
+        background: #2563eb !important;
+        color: #ffffff !important;
+    }
+
+    .stButton > button:hover {
+        background: #1d4ed8 !important;
+        color: #ffffff !important;
+    }
+
+    .stDownloadButton > button {
+        background: #0d9488 !important;
+        color: #ffffff !important;
+    }
+
+    .badge-secure {
+        background: #1e3a8a !important;
+        color: #dbeafe !important;
+    }
+
+    .badge-review {
+        background: #78350f !important;
+        color: #fde68a !important;
+    }
+
+    .badge-compliant,
+    .status-verified {
+        background: #065f46 !important;
+        color: #d1fae5 !important;
+    }
+
+    .status-warning {
+        background: #78350f !important;
+        color: #fde68a !important;
+    }
+
+    .status-invalid {
+        background: #7f1d1d !important;
+        color: #fecaca !important;
+    }
+
+    [data-testid="stDataFrame"] {
+        border-color: #334155 !important;
+    }
+
+    section[data-testid="stSidebar"] {
+        background: #0b1220 !important;
+    }
+
+    section[data-testid="stSidebar"] * {
+        color: #e5e7eb !important;
+    }
+
+    section[data-testid="stSidebar"] .stAlert * {
+        color: #111827 !important;
+    }
+"""
+
+theme_mode = st.session_state.get("display_theme_mode", "System")
+if theme_mode == "System":
+    dark_css = f"""
+<style>
+@media (prefers-color-scheme: dark) {{
+{_dark_mode_css_core}
+}}
+</style>
+"""
+elif theme_mode == "Dark":
+    dark_css = f"""
+<style>
+{_dark_mode_css_core}
+</style>
+"""
+else:
+    dark_css = ""
+
+if dark_css:
+    st.markdown(dark_css, unsafe_allow_html=True)
 
 
 
