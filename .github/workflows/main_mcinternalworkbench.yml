@@ -64,8 +64,9 @@ jobs:
           slot-name: 'Production'
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE }}
           # Note: startup-command is not supported with publish-profile auth scheme.
-          # Set the startup command once in Azure App Service configuration:
-          #   python -m streamlit run streamlit_app.py --server.port 8000 --server.address 0.0.0.0
+          # The startup.sh file in the repo root is deployed alongside the app.
+          # Set the startup command once in Azure App Service → Configuration → General Settings:
+          #   startup.sh
 
       - name: Verify deployment commit
         run: echo "Deployed commit ${{ github.sha }} to MCInternalWorkbench"
