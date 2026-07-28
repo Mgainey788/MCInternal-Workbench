@@ -798,7 +798,7 @@ st.markdown("""
 
         .stTabs [aria-selected="true"] {
             color: #f8fafc !important;
-            border-color: #1f4e79 !important;
+            border: 1px solid #1f4e79 !important;
         }
 
         .stTextInput input,
@@ -819,8 +819,12 @@ st.markdown("""
             border: 1px solid #334155 !important;
         }
 
-        [data-testid="stDataFrame"] *,
-        [data-testid="stTable"] * {
+        [data-testid="stDataFrame"] [role="columnheader"],
+        [data-testid="stDataFrame"] [role="gridcell"],
+        [data-testid="stDataFrame"] [data-testid="stMarkdownContainer"],
+        [data-testid="stTable"] th,
+        [data-testid="stTable"] td,
+        [data-testid="stTable"] [data-testid="stMarkdownContainer"] {
             color: #e5e7eb !important;
         }
 
@@ -830,11 +834,25 @@ st.markdown("""
             border: 1px solid #475569 !important;
         }
 
-        div[data-testid="stAlert"] * {
+        div[data-testid="stAlert"] p,
+        div[data-testid="stAlert"] span,
+        div[data-testid="stAlert"] li,
+        div[data-testid="stAlert"] label,
+        div[data-testid="stAlert"] [data-testid="stMarkdownContainer"] {
             color: #f8fafc !important;
         }
 
-        section[data-testid="stSidebar"] * {
+        section[data-testid="stSidebar"] h1,
+        section[data-testid="stSidebar"] h2,
+        section[data-testid="stSidebar"] h3,
+        section[data-testid="stSidebar"] h4,
+        section[data-testid="stSidebar"] h5,
+        section[data-testid="stSidebar"] h6,
+        section[data-testid="stSidebar"] p,
+        section[data-testid="stSidebar"] span,
+        section[data-testid="stSidebar"] label,
+        section[data-testid="stSidebar"] li,
+        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] {
             color: #f8fafc;
         }
 
@@ -843,7 +861,11 @@ st.markdown("""
             border-color: #475569 !important;
         }
 
-        section[data-testid="stSidebar"] div[data-testid="stAlert"] * {
+        section[data-testid="stSidebar"] div[data-testid="stAlert"] p,
+        section[data-testid="stSidebar"] div[data-testid="stAlert"] span,
+        section[data-testid="stSidebar"] div[data-testid="stAlert"] li,
+        section[data-testid="stSidebar"] div[data-testid="stAlert"] label,
+        section[data-testid="stSidebar"] div[data-testid="stAlert"] [data-testid="stMarkdownContainer"] {
             color: #f8fafc !important;
         }
     }
