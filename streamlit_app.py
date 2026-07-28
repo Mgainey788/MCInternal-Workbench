@@ -751,6 +751,124 @@ st.markdown("""
         margin-top: -8px;
         margin-bottom: 14px;
     }
+
+    @media (prefers-color-scheme: dark) {
+        .stApp,
+        .main {
+            color: #e5e7eb;
+            background-color: #0b1220;
+        }
+
+        .mc-card,
+        .mc-result,
+        .metric-card,
+        .result-card,
+        .mc-evidence,
+        .evidence-box,
+        .privacy-banner {
+            background: #111827;
+            border-color: #334155;
+            color: #e5e7eb;
+        }
+
+        .source-title,
+        .privacy-banner h4,
+        .streamlit-expanderHeader {
+            color: #f8fafc;
+        }
+
+        .source-meta,
+        .small-label,
+        .secure-caption,
+        .qa-hero p {
+            color: #cbd5e1;
+        }
+
+        .stButton > button,
+        .stDownloadButton > button {
+            color: #f8fafc !important;
+            border: 1px solid #475569;
+        }
+
+        .stTabs [data-baseweb="tab"] {
+            background: #0f172a !important;
+            border-color: #334155 !important;
+            color: #e2e8f0 !important;
+        }
+
+        .stTabs [aria-selected="true"] {
+            color: #f8fafc !important;
+            border: 1px solid #1f4e79 !important;
+        }
+
+        .stTextInput input,
+        .stTextArea textarea {
+            background: #0f172a !important;
+            color: #f8fafc !important;
+            border: 1px solid #475569 !important;
+        }
+
+        .stTextInput input::placeholder,
+        .stTextArea textarea::placeholder {
+            color: #94a3b8 !important;
+        }
+
+        [data-testid="stDataFrame"],
+        [data-testid="stTable"] {
+            background: #0f172a;
+            border: 1px solid #334155 !important;
+        }
+
+        [data-testid="stDataFrame"] [role="columnheader"],
+        [data-testid="stDataFrame"] [role="gridcell"],
+        [data-testid="stDataFrame"] [data-testid="stMarkdownContainer"],
+        [data-testid="stTable"] th,
+        [data-testid="stTable"] td,
+        [data-testid="stTable"] [data-testid="stMarkdownContainer"] {
+            color: #e5e7eb !important;
+        }
+
+        div[data-testid="stAlert"] {
+            background: #1f2937 !important;
+            color: #f8fafc !important;
+            border: 1px solid #475569 !important;
+        }
+
+        div[data-testid="stAlert"] p,
+        div[data-testid="stAlert"] span,
+        div[data-testid="stAlert"] li,
+        div[data-testid="stAlert"] label,
+        div[data-testid="stAlert"] [data-testid="stMarkdownContainer"] {
+            color: #f8fafc !important;
+        }
+
+        section[data-testid="stSidebar"] h1,
+        section[data-testid="stSidebar"] h2,
+        section[data-testid="stSidebar"] h3,
+        section[data-testid="stSidebar"] h4,
+        section[data-testid="stSidebar"] h5,
+        section[data-testid="stSidebar"] h6,
+        section[data-testid="stSidebar"] p,
+        section[data-testid="stSidebar"] span,
+        section[data-testid="stSidebar"] label,
+        section[data-testid="stSidebar"] li,
+        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] {
+            color: #f8fafc;
+        }
+
+        section[data-testid="stSidebar"] div[data-testid="stAlert"] {
+            background: #1e293b !important;
+            border-color: #475569 !important;
+        }
+
+        section[data-testid="stSidebar"] div[data-testid="stAlert"] p,
+        section[data-testid="stSidebar"] div[data-testid="stAlert"] span,
+        section[data-testid="stSidebar"] div[data-testid="stAlert"] li,
+        section[data-testid="stSidebar"] div[data-testid="stAlert"] label,
+        section[data-testid="stSidebar"] div[data-testid="stAlert"] [data-testid="stMarkdownContainer"] {
+            color: #f8fafc !important;
+        }
+    }
 </style>
 """, unsafe_allow_html=True)
 
