@@ -63,9 +63,9 @@ jobs:
           app-name: 'MCInternalWorkbench'
           slot-name: 'Production'
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE }}
-          # Startup command tells Azure how to run the Streamlit app.
-          # Without this, Azure defaults to Gunicorn which will NOT serve Streamlit correctly.
-          startup-command: 'python -m streamlit run streamlit_app.py --server.port 8000 --server.address 0.0.0.0'
+          # Note: startup-command is not supported with publish-profile auth scheme.
+          # Set the startup command once in Azure App Service configuration:
+          #   python -m streamlit run streamlit_app.py --server.port 8000 --server.address 0.0.0.0
 
       - name: Verify deployment commit
         run: echo "Deployed commit ${{ github.sha }} to MCInternalWorkbench"
