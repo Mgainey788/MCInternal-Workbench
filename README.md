@@ -7,6 +7,32 @@ This repository contains a Streamlit-based scientific reference QA application f
 - copyright and rights screening
 - reviewer-oriented reporting
 
+## ✏️ How to Edit and Deploy
+
+**One rule:** only edit `streamlit_app.py`. That is the file both Azure and Streamlit Cloud deploy.  
+The `streamlit_app_Version*.py` files are archived snapshots — editing them has no effect on the live app.
+
+### Edit → Deploy Workflow
+
+```
+1. Edit  streamlit_app.py
+2. Commit your changes
+3. Push / merge to the main branch
+4. GitHub Actions auto-deploys to Azure (~2-3 min)
+5. For Streamlit Cloud: confirm it is also pointed at main → streamlit_app.py
+```
+
+### Verify a deployment landed
+After a push to `main`, go to **GitHub → Actions** and open the latest workflow run.  
+The final step prints: `Deployed commit <SHA> to <app-name>`.  
+Compare that SHA against the commit you just pushed. If they match, your changes are live.  
+If the Azure UI still shows old content, do a hard-refresh (`Ctrl+Shift+R`) or restart the App Service.
+
+### Manual deploy
+Both workflows also support **workflow_dispatch** — go to **GitHub → Actions → (workflow name) → Run workflow** to trigger a deploy without pushing new code.
+
+---
+
 ## Current App
 The application entry point is `streamlit_app.py`.
 
