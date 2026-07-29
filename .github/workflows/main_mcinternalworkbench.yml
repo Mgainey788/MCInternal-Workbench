@@ -74,3 +74,4 @@ jobs:
           app-name: 'MCInternalWorkbench'
           slot-name: 'Production'
           package: .
+          
