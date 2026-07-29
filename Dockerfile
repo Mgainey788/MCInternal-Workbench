@@ -15,9 +15,4 @@ COPY .streamlit/ .streamlit/
 
 EXPOSE 8000
 
-CMD ["streamlit", "run", "streamlit_app.py", \
-     "--server.port=8000", \
-     "--server.address=0.0.0.0", \
-     "--server.headless=true", \
-     "--server.enableCORS=false", \
-     "--server.enableXsrfProtection=false"]
+CMD ["sh", "-c", "streamlit run streamlit_app.py --server.port=${PORT:-8000} --server.address=0.0.0.0 --server.headless=true --server.enableCORS=false --server.enableXsrfProtection=false"]
