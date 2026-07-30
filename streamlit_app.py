@@ -132,6 +132,7 @@ class SemanticLibrary:
                     "passage": passages[idx].get("passage", ""),
                     "source_name": passages[idx].get("source_name", ""),
                     "page_number": passages[idx].get("page_number"),
+                    "document_page_label": passages[idx].get("document_page_label"),
                     "page_paragraph_number": passages[idx].get("page_paragraph_number"),
                     "column_paragraph_number": passages[idx].get("column_paragraph_number"),
                     "column_number": passages[idx].get("column_number"),
@@ -177,6 +178,7 @@ class SemanticLibrary:
                 "passage": payload.get("passage", ""),
                 "source_name": payload.get("source_name", ""),
                 "page_number": payload.get("page_number"),
+                "document_page_label": payload.get("document_page_label"),
                 "page_paragraph_number": payload.get("page_paragraph_number"),
                 "column_paragraph_number": payload.get("column_paragraph_number"),
                 "column_number": payload.get("column_number"),
@@ -1513,6 +1515,7 @@ def build_source_location_label(
     column_number=None,
     sentence_number=None,
     column_paragraph_number=None,
+    document_page_label=None,
 ):
     """Build a readable page/column/paragraph/sentence location label."""
     page_text = _annotation_page_value(page_number)
@@ -1523,8 +1526,11 @@ def build_source_location_label(
     col_i = _annotation_int(column_number)
     col_para_i = _annotation_int(column_paragraph_number)
     sent_i = _annotation_int(sentence_number)
+    doc_label = clean_text(document_page_label)
 
     parts = [f"Page {page_text}"]
+    if doc_label and doc_label != str(page_text):
+        parts[0] = f"Page {page_text} (doc label: {doc_label})"
     if col_i is not None:
         parts.append(f"Column {col_i}")
     if col_para_i is not None:
@@ -1551,6 +1557,7 @@ def build_source_location_annotation(
     column_number=None,
     sentence_number=None,
     column_paragraph_number=None,
+    document_page_label=None,
 ):
     source_location = build_source_location_label(
         page_number=page_number,
@@ -1559,6 +1566,7 @@ def build_source_location_annotation(
         column_number=column_number,
         sentence_number=sentence_number,
         column_paragraph_number=column_paragraph_number,
+        document_page_label=document_page_label,
     )
     claim_text = clean_text(claim_text)
     reference_name = clean_text(reference_name) or "Reference"
@@ -1717,12 +1725,13 @@ def extract_text_from_upload(uploaded_file):
                 except Exception:
                     page_text = ""
                 if page_text.strip():
-                    page_label = str(page_index)
+                    viewer_page = page_index
+                    doc_label = str(viewer_page)
                     if page_index - 1 < len(page_labels):
                         label_text = clean_text(page_labels[page_index - 1])
                         if label_text:
-                            page_label = label_text
-                    lines.append(f"[[PDF_PAGE_LABEL:{page_label}]] {page_text.strip()}")
+                            doc_label = label_text
+                    lines.append(f"[[PDF_PAGE:{viewer_page}|LABEL:{doc_label}]] {page_text.strip()}")
 
             if not lines:
                 st.warning(
@@ -2695,6 +2704,7 @@ def make_attribution_row(
     column_number=None,
     sentence_number=None,
     column_paragraph_number=None,
+    document_page_label=None,
 ):
     source_location = build_source_location_annotation(
         reference_name=citation or article_title,
@@ -2706,6 +2716,7 @@ def make_attribution_row(
         column_number=column_number,
         sentence_number=sentence_number,
         column_paragraph_number=column_paragraph_number,
+        document_page_label=document_page_label,
     )
     annotation_format = build_journal_article_annotation(
         citation=citation,
@@ -2740,6 +2751,7 @@ def make_attribution_row(
         "client_source": client_source or "",
         "recommendation": recommendation or "",
         "page_number": page_number,
+        "document_page_label": document_page_label,
         "paragraph_number": paragraph_number,
         "line_range": line_range or "",
         "column_number": column_number,
@@ -3638,7 +3650,11 @@ def render_semantic_fact_check_result(result: dict):
         for rank_i, p in enumerate(top_passages, 1):
             page_para = p.get("page_paragraph_number")
             page_no = p.get("page_number")
-            location_label = build_source_location_label(page_no, page_para)
+            location_label = build_source_location_label(
+                page_no,
+                page_para,
+                document_page_label=p.get("document_page_label"),
+            )
             if not location_label:
                 location_label = f"Page {page_no or '?'}, Paragraph {page_para or '?'}"
             with st.expander(
@@ -4224,19 +4240,33 @@ def split_article_into_passages(article_text, source_name=""):
     )
 
     page_chunks = re.split(
-        r"(?=\[\[PDF_PAGE_LABEL:[^\]]+\]\])|(?=\bPage\s+\d+\s*:)",
+        r"(?=\[\[PDF_PAGE:\d+\|LABEL:[^\]]+\]\])|(?=\[\[PDF_PAGE_LABEL:[^\]]+\]\])|(?=\bPage\s+\d+\s*:)",
         raw_text,
     )
     labeled_chunks = []
 
     for chunk in page_chunks:
+        page_marker_match = re.match(
+            r"\s*\[\[PDF_PAGE:(\d+)\|LABEL:([^\]]+)\]\]\s*(.*)",
+            chunk,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if page_marker_match:
+            labeled_chunks.append((
+                int(page_marker_match.group(1)),
+                clean_text(page_marker_match.group(2)),
+                page_marker_match.group(3),
+            ))
+            continue
+
         page_label_match = re.match(
             r"\s*\[\[PDF_PAGE_LABEL:([^\]]+)\]\]\s*(.*)",
             chunk,
             flags=re.IGNORECASE | re.DOTALL,
         )
         if page_label_match:
-            labeled_chunks.append((clean_text(page_label_match.group(1)), page_label_match.group(2)))
+            page_label = clean_text(page_label_match.group(1))
+            labeled_chunks.append((page_label, page_label, page_label_match.group(2)))
             continue
 
         page_match = re.match(
@@ -4245,12 +4275,13 @@ def split_article_into_passages(article_text, source_name=""):
             flags=re.IGNORECASE | re.DOTALL,
         )
         if page_match:
-            labeled_chunks.append((page_match.group(1), page_match.group(2)))
+            viewer_page = int(page_match.group(1))
+            labeled_chunks.append((viewer_page, str(viewer_page), page_match.group(2)))
 
     if not labeled_chunks:
-        labeled_chunks = [(None, raw_text)]
+        labeled_chunks = [(None, "", raw_text)]
 
-    for page_number, chunk_text in labeled_chunks:
+    for page_number, document_page_label, chunk_text in labeled_chunks:
         cleaned_chunk = remove_abstract_language(clean_text(chunk_text))
         if not cleaned_chunk:
             continue
@@ -4297,6 +4328,7 @@ def split_article_into_passages(article_text, source_name=""):
                         "sentence_number": page_sentence_counter,
                         "column_number": column_number,
                         "page_number": page_number,
+                        "document_page_label": document_page_label,
                         "section_label": section_label,
                         "passage": sentence,
                     })
@@ -4409,6 +4441,7 @@ def search_uploaded_article_library(claims, uploaded_article_files, article_text
                     "source_publication_year": item.get("source_publication_year", ""),
                     "passage_number": item["passage_number"],
                     "page_number": item.get("page_number"),
+                    "document_page_label": item.get("document_page_label"),
                     "paragraph_number": item.get("page_paragraph_number") if item.get("page_number") is not None else None,
                     "column_paragraph_number": item.get("column_paragraph_number"),
                     "column_number": item.get("column_number"),
@@ -4448,6 +4481,7 @@ def search_uploaded_article_library(claims, uploaded_article_files, article_text
                     "source_publication_year": item.get("source_publication_year", ""),
                     "passage_number": item["passage_number"],
                     "page_number": item.get("page_number"),
+                    "document_page_label": item.get("document_page_label"),
                     "paragraph_number": item.get("page_paragraph_number") if item.get("page_number") is not None else None,
                     "column_paragraph_number": item.get("column_paragraph_number"),
                     "column_number": item.get("column_number"),
@@ -4494,13 +4528,15 @@ def search_uploaded_article_library(claims, uploaded_article_files, article_text
 
             for rank_index, match in enumerate(selected, start=1):
                 status = attribution_status(match["score"], match["passage"], claim=claim)
-                location = f"Local passage #{match['passage_number']}"
-                if match.get("page_number"):
-                    page_para = match.get("paragraph_number")
-                    if page_para is not None:
-                        location = f"Page {match['page_number']}, Paragraph {page_para}"
-                    else:
-                        location = f"Page {match['page_number']}, Paragraph ?"
+                location = build_source_location_label(
+                    match.get("page_number"),
+                    match.get("paragraph_number"),
+                    match.get("line_range", ""),
+                    column_number=match.get("column_number"),
+                    sentence_number=match.get("sentence_number"),
+                    column_paragraph_number=match.get("column_paragraph_number"),
+                    document_page_label=match.get("document_page_label"),
+                ) or f"Local passage #{match['passage_number']}"
 
                 rows.append(make_attribution_row(
                     workflow="Local full-text source attribution",
@@ -4522,6 +4558,10 @@ def search_uploaded_article_library(claims, uploaded_article_files, article_text
                     reviewer_note=reviewer_note if rank_index == 1 else "",
                     section_heading=match.get("section_label", ""),
                     source_publication_year=match.get("source_publication_year", ""),
+                    column_number=match.get("column_number"),
+                    sentence_number=match.get("sentence_number"),
+                    column_paragraph_number=match.get("column_paragraph_number"),
+                    document_page_label=match.get("document_page_label"),
                 ))
         else:
             rows.append(make_attribution_row(
@@ -5077,6 +5117,7 @@ def render_professional_rows(rows, show_client_check=True):
                             column_number=row.get("column_number"),
                             sentence_number=row.get("sentence_number"),
                             column_paragraph_number=row.get("column_paragraph_number"),
+                            document_page_label=row.get("document_page_label"),
                         ) or "-",
                         axis=1,
                     )
@@ -5122,6 +5163,7 @@ def render_professional_rows(rows, show_client_check=True):
                             column_number=loc.get("column_number"),
                             sentence_number=loc.get("sentence_number"),
                             column_paragraph_number=loc.get("column_paragraph_number"),
+                            document_page_label=loc.get("document_page_label"),
                         )
                         if source_location:
                             st.write(f"Source Location: {source_location}")
@@ -7420,4 +7462,3 @@ if st.button("Clear Session Data"):
 
     st.success("Session data cleared.")
     st.rerun()
-
