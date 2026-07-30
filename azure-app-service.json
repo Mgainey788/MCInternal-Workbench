@@ -27,7 +27,7 @@
       "type": "string",
       "defaultValue": "B2",
       "metadata": {
-        "description": "App Service Plan SKU"
+        "description": "SKU for the App Service Plan"
       }
     }
   },
@@ -40,10 +40,11 @@
       "kind": "linux",
       "sku": {
         "name": "[parameters('skuName')]",
-        "capacity": 1
+        "tier": "Standard"
       },
       "properties": {
-        "reserved": true
+        "reserved": true,
+        "numberOfWorkers": 1
       }
     },
     {
@@ -51,7 +52,7 @@
       "apiVersion": "2022-03-01",
       "name": "[parameters('webAppName')]",
       "location": "[parameters('location')]",
-      "kind": "app,linux",
+      "kind": "app",
       "dependsOn": [
         "[resourceId('Microsoft.Web/serverfarms', parameters('appServicePlanName'))]"
       ],
@@ -63,22 +64,22 @@
           "alwaysOn": true,
           "http20Enabled": true,
           "minimumTlsVersion": "1.2",
-          "appCommandLine": "python -m streamlit run streamlit_app.py --server.port=8000 --server.address=0.0.0.0 --server.headless=true",
-          "appSettings": [
-            {
-              "name": "SCM_DO_BUILD_DURING_DEPLOYMENT",
-              "value": "true"
-            },
-            {
-              "name": "ENABLE_ORYX_BUILD",
-              "value": "true"
-            },
-            {
-              "name": "WEBSITES_PORT",
-              "value": "8000"
-            }
-          ]
-        }
+          "appCommandLine": "python -m streamlit run streamlit_app.py --server.port=8000 --server.address=0.0.0.0 --server.headless=true"
+        },
+        "appSettings": [
+          {
+            "name": "SCM_DO_BUILD_DURING_DEPLOYMENT",
+            "value": "true"
+          },
+          {
+            "name": "ENABLE_ORYX_BUILD",
+            "value": "true"
+          },
+          {
+            "name": "WEBSITES_PORT",
+            "value": "8000"
+          }
+        ]
       }
     }
   ],

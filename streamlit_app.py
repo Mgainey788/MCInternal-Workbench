@@ -20,21 +20,23 @@ from bs4 import BeautifulSoup
 
 try:
     from pptx import Presentation
-except Exception:
+except ImportError:
     Presentation = None
 
 try:
     from pypdf import PdfReader
-except Exception:
+except ImportError:
     PdfReader = None
 
 # =========================================================
 # SEMANTIC SEARCH DEPENDENCIES (OPTIONAL)
 # =========================================================
+# These packages are optional. The core application remains usable when they
+# are not installed, which keeps the initial Azure deployment lightweight.
 try:
     from sentence_transformers import SentenceTransformer
     _SENTENCE_TRANSFORMERS_AVAILABLE = True
-except Exception:
+except ImportError:
     SentenceTransformer = None
     _SENTENCE_TRANSFORMERS_AVAILABLE = False
 
@@ -42,8 +44,11 @@ try:
     from qdrant_client import QdrantClient
     from qdrant_client.models import Distance, VectorParams, PointStruct
     _QDRANT_AVAILABLE = True
-except Exception:
+except ImportError:
     QdrantClient = None
+    Distance = None
+    VectorParams = None
+    PointStruct = None
     _QDRANT_AVAILABLE = False
 
 _BIOMEDICAL_MODEL_NAME = "allenai/specter2_base"  # SPECTER2 for biomedical
@@ -246,15 +251,15 @@ def semantic_confidence_label(score: float) -> str:
 # =========================================================
 st.set_page_config(
     page_title="Source Attribution & Copyright QA",
-    layout="wide"
+    page_icon="🔎",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-# Allow larger uploads/messages to reduce browser-side upload failures on PDFs.
-try:
-    st.set_option("server.maxUploadSize", 500)
-    st.set_option("server.maxMessageSize", 500)
-except Exception:
-    pass
+# Server-level settings such as upload size, message size, host address, and
+# headless mode belong in .streamlit/config.toml or the Azure startup command.
+# Setting them here at runtime can be ignored or rejected by some Streamlit
+# versions and hosting environments.
 
 DEFAULT_THEME_COLORS = {
     "app_bg_top": "#f5f8fc",
@@ -434,14 +439,7 @@ st.markdown("""
 <style>
     /* SCIENTIFIC INTELLIGENCE DESIGN */
 
-    #MainMenu, footer {visibility: hidden;}
-/* keep header visible */
-
-st.set_page_config(
-    page_title="Source Attribution & Copyright QA",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+    #MainMenu, footer, header {visibility: hidden;}
 
     .stApp {
         background: linear-gradient(180deg, #f5f8fc 0%, #eef3f8 100%);
@@ -735,10 +733,8 @@ st.set_page_config(
         margin-bottom: 4px;
     }
 
-    /* Make Streamlit feel more like a web application */
-    #MainMenu {visibility: hidden;}
+    /* Keep Streamlit menu/header visible so users can access sidebar and theme controls. */
     footer {visibility: hidden;}
-    header {visibility: hidden;}
 
     .privacy-banner {
         background-color: #eef4ff;
