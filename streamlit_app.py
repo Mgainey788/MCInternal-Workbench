@@ -434,7 +434,8 @@ st.markdown("""
 <style>
     /* SCIENTIFIC INTELLIGENCE DESIGN */
 
-    #MainMenu, footer, header {visibility: hidden;}
+    #MainMenu, footer {visibility: hidden;}
+/* keep header visible */
 
     .stApp {
         background: linear-gradient(180deg, #f5f8fc 0%, #eef3f8 100%);
