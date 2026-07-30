@@ -437,6 +437,12 @@ st.markdown("""
     #MainMenu, footer {visibility: hidden;}
 /* keep header visible */
 
+st.set_page_config(
+    page_title="Source Attribution & Copyright QA",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
     .stApp {
         background: linear-gradient(180deg, #f5f8fc 0%, #eef3f8 100%);
         font-family: "Segoe UI", sans-serif;
