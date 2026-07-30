@@ -11,16 +11,16 @@
     },
     "webAppName": {
       "type": "string",
-      "defaultValue": "mcinternal-workbench",
+      "defaultValue": "MCInternalWorkbench",
       "metadata": {
-        "description": "Name of the web app"
+        "description": "Name of the Azure Web App"
       }
     },
     "location": {
       "type": "string",
       "defaultValue": "[resourceGroup().location]",
       "metadata": {
-        "description": "Location for resources"
+        "description": "Azure region for the resources"
       }
     },
     "skuName": {
@@ -34,21 +34,21 @@
   "resources": [
     {
       "type": "Microsoft.Web/serverfarms",
-      "apiVersion": "2021-02-01",
+      "apiVersion": "2022-03-01",
       "name": "[parameters('appServicePlanName')]",
       "location": "[parameters('location')]",
+      "kind": "linux",
       "sku": {
         "name": "[parameters('skuName')]",
         "capacity": 1
       },
-      "kind": "linux",
       "properties": {
         "reserved": true
       }
     },
     {
       "type": "Microsoft.Web/sites",
-      "apiVersion": "2021-02-01",
+      "apiVersion": "2022-03-01",
       "name": "[parameters('webAppName')]",
       "location": "[parameters('location')]",
       "kind": "app,linux",
@@ -57,19 +57,25 @@
       ],
       "properties": {
         "serverFarmId": "[resourceId('Microsoft.Web/serverfarms', parameters('appServicePlanName'))]",
+        "httpsOnly": true,
         "siteConfig": {
-          "linuxFxVersion": "PYTHON|3.11",
+          "linuxFxVersion": "PYTHON|3.12",
           "alwaysOn": true,
           "http20Enabled": true,
-          "appCommandLine": "python -m streamlit run streamlit_app.py --server.port ${PORT:-8000} --server.address 0.0.0.0 --server.headless true",
+          "minimumTlsVersion": "1.2",
+          "appCommandLine": "python -m streamlit run streamlit_app.py --server.port=8000 --server.address=0.0.0.0 --server.headless=true",
           "appSettings": [
-            {
-              "name": "WEBSITES_ENABLE_APP_SERVICE_STORAGE",
-              "value": "false"
-            },
             {
               "name": "SCM_DO_BUILD_DURING_DEPLOYMENT",
               "value": "true"
+            },
+            {
+              "name": "ENABLE_ORYX_BUILD",
+              "value": "true"
+            },
+            {
+              "name": "WEBSITES_PORT",
+              "value": "8000"
             }
           ]
         }
