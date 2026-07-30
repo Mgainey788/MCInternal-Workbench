@@ -4246,28 +4246,30 @@ def split_article_into_passages(article_text, source_name=""):
     labeled_chunks = []
 
     for chunk in page_chunks:
-        page_marker_match = re.match(
-            r"\s*\[\[PDF_PAGE:(\d+)\|LABEL:([^\]]+)\]\]\s*(.*)",
-            chunk,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        if page_marker_match:
-            labeled_chunks.append((
-                int(page_marker_match.group(1)),
-                clean_text(page_marker_match.group(2)),
-                page_marker_match.group(3),
-            ))
-            continue
+        stripped_chunk = chunk.lstrip()
+        chunk_upper = stripped_chunk.upper()
 
-        page_label_match = re.match(
-            r"\s*\[\[PDF_PAGE_LABEL:([^\]]+)\]\]\s*(.*)",
-            chunk,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        if page_label_match:
-            page_label = clean_text(page_label_match.group(1))
-            labeled_chunks.append((page_label, page_label, page_label_match.group(2)))
-            continue
+        if chunk_upper.startswith("[[PDF_PAGE:"):
+            marker_end = stripped_chunk.find("]]")
+            if marker_end != -1:
+                marker_text = stripped_chunk[11:marker_end]
+                body = stripped_chunk[marker_end + 2:].lstrip()
+                viewer_text, sep, label_text = marker_text.partition("|LABEL:")
+                viewer_page = _annotation_int(viewer_text)
+                if sep and viewer_page is not None:
+                    labeled_chunks.append((
+                        viewer_page,
+                        clean_text(label_text),
+                        body,
+                    ))
+                    continue
+
+        if chunk_upper.startswith("[[PDF_PAGE_LABEL:"):
+            marker_end = stripped_chunk.find("]]")
+            if marker_end != -1:
+                page_label = clean_text(stripped_chunk[17:marker_end])
+                labeled_chunks.append((page_label, page_label, stripped_chunk[marker_end + 2:].lstrip()))
+                continue
 
         page_match = re.match(
             r"\s*Page\s+(\d+)\s*:\s*(.*)",
@@ -4277,6 +4279,7 @@ def split_article_into_passages(article_text, source_name=""):
         if page_match:
             viewer_page = int(page_match.group(1))
             labeled_chunks.append((viewer_page, str(viewer_page), page_match.group(2)))
+            continue
 
     if not labeled_chunks:
         labeled_chunks = [(None, "", raw_text)]
