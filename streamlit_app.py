@@ -10,7 +10,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 from difflib import SequenceMatcher
 from datetime import datetime, timezone
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 import pandas as pd
 import requests
@@ -4567,31 +4567,31 @@ def get_oa_status_info(oa_status):
     mapping = {
         "green": {
             "label": "Open Access (Green)",
-            "meaning": "Full text available (repository or archive copy).",
+            "meaning": "Free full text available (repository/archive copy).",
             "bg": "#16a34a",
             "text": "#ffffff",
         },
         "gold": {
             "label": "Open Access (Gold)",
-            "meaning": "Full text available on the publisher site.",
+            "meaning": "Free full text available on the publisher site.",
             "bg": "#ca8a04",
             "text": "#ffffff",
         },
         "bronze": {
             "label": "Free to Read (Bronze)",
-            "meaning": "Full text available to read; reuse license may be unclear.",
+            "meaning": "Free full text available to read; reuse license may be unclear.",
             "bg": "#b45309",
             "text": "#ffffff",
         },
         "closed": {
-            "label": "Closed",
-            "meaning": "No free full text available was identified.",
+            "label": "Closed (OA)",
+            "meaning": "No free OA full text identified. Publisher full text may still exist (subscription/login may be required).",
             "bg": "#dc2626",
             "text": "#ffffff",
         },
         "hybrid": {
             "label": "Open Access (Hybrid)",
-            "meaning": "Full text available on publisher site under a hybrid model.",
+            "meaning": "Free full text available for this article on publisher site under hybrid model.",
             "bg": "#2563eb",
             "text": "#ffffff",
         },
@@ -4690,9 +4690,84 @@ def extract_page_metadata_for_copyright(html, url):
     return {
         "title": page_title,
         "domain": get_domain(url),
+        "page_url": url,
         "meta_tags": meta_tags,
         "links": links,
         "text_sample": body_text[:8000],
+    }
+
+
+def detect_full_text_availability(crossref_info, page_data, unpaywall_info):
+    """Distinguish free OA full text from publisher full text availability."""
+    best_oa_url = get_best_oa_url(unpaywall_info)
+    has_free_oa_full_text = bool(best_oa_url)
+
+    candidates = []
+
+    landing_url = clean_text((crossref_info or {}).get("url", ""))
+    doi_clean = normalize_doi((crossref_info or {}).get("doi", ""))
+
+    if landing_url:
+        candidates.append(landing_url)
+        if doi_clean and "/doi/" in landing_url:
+            parsed = urlparse(landing_url)
+            base = f"{parsed.scheme}://{parsed.netloc}"
+            candidates.extend([
+                f"{base}/doi/epdf/{doi_clean}",
+                f"{base}/doi/pdf/{doi_clean}",
+            ])
+
+    if page_data:
+        base_url = clean_text(page_data.get("page_url", "")) or landing_url
+        for key, value in page_data.get("meta_tags", []):
+            key_l = (key or "").lower()
+            value_u = clean_text(value)
+            if not value_u:
+                continue
+            if "pdf" in key_l or "citation_pdf_url" in key_l:
+                candidates.append(urljoin(base_url, value_u))
+
+        for rel, href in page_data.get("links", []):
+            href_u = clean_text(href)
+            if not href_u:
+                continue
+            abs_u = urljoin(base_url, href_u)
+            low = abs_u.lower()
+            rel_l = (rel or "").lower()
+            if any(t in low for t in ["/epdf/", "/pdf/", "articlepdf", "fulltext", "full-text", "download"]):
+                candidates.append(abs_u)
+            elif "pdf" in rel_l:
+                candidates.append(abs_u)
+
+    normalized = []
+    seen = set()
+    for c in candidates:
+        c = to_clickable_url(c)
+        if not c or not re.match(r"^https?://", c, flags=re.IGNORECASE):
+            continue
+        if is_permissions_portal_url(c):
+            continue
+        k = c.lower().strip()
+        if k not in seen:
+            seen.add(k)
+            normalized.append(c)
+
+    def rank_url(u):
+        l = u.lower()
+        if "/epdf/" in l or "/pdf/" in l or "articlepdf" in l:
+            return 3
+        if "fulltext" in l or "full-text" in l:
+            return 2
+        return 1
+
+    normalized.sort(key=rank_url, reverse=True)
+    publisher_full_text_url = normalized[0] if normalized else ""
+    has_publisher_full_text = bool(publisher_full_text_url)
+    return {
+        "has_free_oa_full_text": has_free_oa_full_text,
+        "has_publisher_full_text": bool(publisher_full_text_url),
+        "best_oa_url": best_oa_url,
+        "publisher_full_text_url": publisher_full_text_url,
     }
 
 
@@ -4887,40 +4962,56 @@ def get_intended_use_guidance_for_copyright(category, intended_use, permissions_
     return ("info", f"For '{intended_use}', the available signals are not definitive. Review publisher-specific permissions before reuse.")
 
 
-def build_copyright_report(input_type, user_input, intended_use, crossref_info, unpaywall_info, category, summary, confidence):
+def build_copyright_report(input_type, user_input, intended_use, crossref_info, unpaywall_info, category, summary, confidence, full_text_info=None):
+    full_text_info = full_text_info or {}
+    best_oa_url = full_text_info.get("best_oa_url") or get_best_oa_url(unpaywall_info)
+    publisher_full_text_url = full_text_info.get("publisher_full_text_url", "")
+
     lines = [
-        "Enterprise Copyright Assessment Report",
-        f"Timestamp (UTC): {now_utc()}",
-        f"Input type: {input_type}",
-        f"Input value: {user_input}",
-        f"Intended use: {intended_use}",
+        "### Enterprise Copyright Assessment Report",
+        f"- **Timestamp (UTC):** {now_utc()}",
+        f"- **Input type:** {input_type}",
+        f"- **Input value:** {user_input}",
+        f"- **Intended use:** {intended_use}",
         "",
-        f"Assessment category: {category}",
-        f"Confidence: {confidence}",
+        f"- **Assessment category:** {category}",
+        f"- **Confidence:** {confidence}",
         "",
-        "Summary:",
+        "#### Summary",
         summary,
         "",
-        "Practical interpretation:",
+        "#### Practical interpretation",
         "- Sharing a link is generally safer than reposting the full article.",
         "- Reuse of figures, tables, or substantial excerpts may require permission.",
         "- Open access does not always equal unrestricted commercial reuse.",
-        "- This tool supports review but is not a substitute for legal advice or publisher terms.",
     ]
 
     if crossref_info:
         lines.extend([
             "",
-            "Article identified:",
-            f"- Title: {crossref_info.get('title', 'Unknown')}",
-            f"- DOI: {crossref_info.get('doi', 'Unknown')}",
-            f"- Journal: {crossref_info.get('journal', 'Unknown')}",
-            f"- Publisher: {crossref_info.get('publisher', 'Unknown')}",
+            "#### Article identified",
+            f"- **Title:** {crossref_info.get('title', 'Unknown')}",
+            f"- **Journal:** {crossref_info.get('journal', 'Unknown')}",
+            f"- **Publisher:** {crossref_info.get('publisher', 'Unknown')}",
+        ])
+        doi = crossref_info.get("doi", "")
+        if doi:
+            doi_url = canonical_doi_url(doi)
+            lines.append(f"- **DOI:** [{doi}]({doi_url})")
+        if crossref_info.get("url"):
+            lines.append(f"- **Publisher page:** [{crossref_info.get('url')}]({crossref_info.get('url')})")
+
+    if best_oa_url:
+        lines.extend([
+            "",
+            "#### Full-text links",
+            f"- **Free OA full text:** [{best_oa_url}]({best_oa_url})",
         ])
 
-    best_url = get_best_oa_url(unpaywall_info)
-    if best_url:
-        lines.extend(["", "Available source:", f"- {best_url}"])
+    if publisher_full_text_url and publisher_full_text_url != best_oa_url:
+        lines.append(
+            f"- **Publisher full text (may require subscription/login):** [{publisher_full_text_url}]({publisher_full_text_url})"
+        )
 
     return "\n".join(lines)
 
@@ -6915,6 +7006,7 @@ with tab_copyright:
                 page_data = None
                 page_clues = []
                 tdm_result = None
+                full_text_info = {}
 
                 with st.spinner("Running copyright assessment..."):
                     if copyright_input_type == "URL":
@@ -6978,6 +7070,8 @@ with tab_copyright:
                         unpaywall_info,
                     )
 
+                    full_text_info = detect_full_text_availability(crossref_info, page_data, unpaywall_info)
+
                     report = build_copyright_report(
                         copyright_input_type,
                         copyright_user_input,
@@ -6987,6 +7081,7 @@ with tab_copyright:
                         category,
                         summary,
                         confidence,
+                        full_text_info=full_text_info,
                     )
 
                     if run_tmdi_check:
@@ -7024,14 +7119,16 @@ with tab_copyright:
                         "best_oa_url": get_best_oa_url(unpaywall_info),
                     }
 
-                    st.session_state.copyright_log.append(sanitize_rows_for_log([log_row])[0])
-
                 oa_status = ""
-                available_url = ""
+                available_url = full_text_info.get("best_oa_url", "")
+                publisher_full_text_url = full_text_info.get("publisher_full_text_url", "")
+                has_free_oa_full_text = bool(full_text_info.get("has_free_oa_full_text"))
+                has_publisher_full_text = bool(full_text_info.get("has_publisher_full_text"))
 
                 if unpaywall_info and unpaywall_info.get("status") == "available":
                     oa_status = unpaywall_info.get("oa_status", "")
-                    available_url = get_best_oa_url(unpaywall_info)
+                if unpaywall_info and unpaywall_info.get("status") == "available":
+                    oa_status = unpaywall_info.get("oa_status", "")
 
                 left, right = st.columns([2, 1])
 
@@ -7044,6 +7141,9 @@ with tab_copyright:
                     if oa_status:
                         st.subheader("Open Access Status")
                         render_status_badge(oa_status)
+
+                        if oa_status.lower() == "closed" and publisher_full_text_url:
+                            st.info("OA is Closed (no free OA copy identified), but publisher full text appears available below.")
 
                     guidance_type, guidance_text = get_intended_use_guidance_for_copyright(
                         category,
@@ -7061,11 +7161,17 @@ with tab_copyright:
                     elif guidance_type == "error":
                         st.error(guidance_text)
                     else:
-                        st.info(guidance_text)
+                        pass
+
+                    st.subheader("Full Text Availability")
+                    st.write(f"**Free OA full text:** {'Yes' if has_free_oa_full_text else 'No'}")
+                    st.write(f"**Publisher full text (may require login/subscription):** {'Yes' if has_publisher_full_text else 'No'}")
 
                     if available_url and not is_permissions_portal_url(available_url):
-                        st.subheader("Available Article Source")
-                        render_url_link("Open available article source", available_url)
+                        render_url_link("Free OA full text", available_url)
+
+                    if publisher_full_text_url and publisher_full_text_url != available_url:
+                        render_url_link("Publisher full text (may require login/subscription)", publisher_full_text_url)
 
                     if run_tmdi_check and tdm_result:
                         st.subheader("TDMI (TDM/AI-Use) Check")
@@ -7081,7 +7187,7 @@ with tab_copyright:
                         st.write(f"- {finding}")
 
                     st.subheader("Plain-English Report")
-                    st.text(report)
+                    st.markdown(report)
 
                 with right:
                     st.subheader("Article")
