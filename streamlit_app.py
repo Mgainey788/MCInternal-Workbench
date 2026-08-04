@@ -10,7 +10,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 from difflib import SequenceMatcher
 from datetime import datetime, timezone
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 import pandas as pd
 import requests
@@ -2350,6 +2350,16 @@ def keyword_tokens(text):
     return [word for word in words if word not in stop_words]
 
 
+def _token_set(text):
+    return set(keyword_tokens(text))
+
+
+def _overlap_count(left_terms, right_terms):
+    if not left_terms or not right_terms:
+        return 0
+    return len(left_terms.intersection(right_terms))
+
+
 def term_overlap_score(claim, target):
     claim_terms = set(keyword_tokens(claim))
     target_terms = set(keyword_tokens(target))
@@ -4342,8 +4352,8 @@ def split_article_into_passages(article_text, source_name=""):
 def search_uploaded_article_library(claims, uploaded_article_files, article_text_box="", keywords="", max_results_per_claim=5):
     article_passages = []
     restriction_hits = []
-    chunk_threshold = 70.0
     top_candidates = 5
+    max_passages_per_source = 6000  # hard cap to keep runtime predictable on very large PDFs
 
     for uploaded_file in uploaded_article_files or []:
         article_text = extract_text_from_upload(uploaded_file)
@@ -4358,7 +4368,11 @@ def search_uploaded_article_library(claims, uploaded_article_files, article_text
                 }
             )
         source_name = uploaded_file.name
-        article_passages.extend(split_article_into_passages(article_text, source_name=source_name))
+        source_passages = split_article_into_passages(article_text, source_name=source_name)
+        if len(source_passages) > max_passages_per_source:
+            source_passages = source_passages[:max_passages_per_source]
+            st.info(f"{source_name}: large file detected. Scanning first {max_passages_per_source} passages for faster results.")
+        article_passages.extend(source_passages)
 
     if restriction_hits:
         st.warning("Warning: one or more uploaded references contain AI-use, AI-training, text/data-mining, or confidentiality restriction language.")
@@ -4377,22 +4391,80 @@ def search_uploaded_article_library(claims, uploaded_article_files, article_text
                         st.write(f"- {match}")
 
     if article_text_box.strip():
-        article_passages.extend(split_article_into_passages(article_text_box, source_name="Pasted article/full text"))
+        pasted_passages = split_article_into_passages(article_text_box, source_name="Pasted article/full text")
+        if len(pasted_passages) > max_passages_per_source:
+            pasted_passages = pasted_passages[:max_passages_per_source]
+            st.info(f"Pasted text is large. Scanning first {max_passages_per_source} passages for faster results.")
+        article_passages.extend(pasted_passages)
 
     rows = []
 
+    if not article_passages:
+        for claim_number, claim in enumerate(claims, start=1):
+            rows.append(make_attribution_row(
+                workflow="Local full-text source attribution",
+                claim_number=claim_number,
+                claim=claim,
+                source_status="NOT VERIFIED",
+                article_title="No extractable text found",
+                source_database="Uploaded article library",
+                retrieval_type="No local passage match",
+                score=0,
+                citation="No extractable text found in uploaded/pasted sources (possible scanned PDF/OCR issue).",
+                recommendation="Try an OCR-processed PDF/TXT or paste machine-readable full text.",
+            ))
+        return rows
+
+    # Precompute tokens once per passage for speed.
+    indexed_passages = []
+    for item in article_passages:
+        passage = item.get("passage", "")
+        indexed_passages.append({
+            "item": item,
+            "passage": passage,
+            "terms": _token_set(passage),
+            "section_label": item.get("section_label") or classify_passage_section(passage),
+        })
+
     for claim_number, claim in enumerate(claims, start=1):
         claim_fragments = extract_claim_fragments(claim)
+        claim_terms = _token_set(claim)
+        if not claim_terms and keywords:
+            claim_terms = _token_set(keywords)
+
+        fragment_meta = [(fragment, _token_set(fragment)) for fragment in claim_fragments]
+        adaptive_threshold = 40 if len(clean_text(claim).split()) < 18 else 50
         scored = []
 
-        for item in article_passages:
-            passage = item["passage"]
-            overlap_score = term_overlap_score(claim, passage)
-            phrase_score = exact_phrase_score(claim, passage)
-            score = overlap_score * 2
-            score += phrase_score
+        # Fast prefilter before expensive phrase scoring.
+        if claim_terms:
+            ranked_prefilter = sorted(
+                indexed_passages,
+                key=lambda p: _overlap_count(claim_terms, p["terms"]),
+                reverse=True,
+            )
+            candidate_pool = [p for p in ranked_prefilter if _overlap_count(claim_terms, p["terms"]) > 0][:1500]
+            if not candidate_pool:
+                candidate_pool = ranked_prefilter[:800]
+        else:
+            candidate_pool = indexed_passages[:800]
 
-            # Prefer chunks with exact phrase overlap.
+        for indexed in candidate_pool:
+            item = indexed["item"]
+            passage = indexed["passage"]
+            passage_terms = indexed["terms"]
+
+            overlap_n = _overlap_count(claim_terms, passage_terms)
+            overlap_score = round((overlap_n / max(len(claim_terms), 1)) * 100, 1) if claim_terms else term_overlap_score(claim, passage)
+
+            # Only run expensive phrase match when there is minimal lexical evidence.
+            if len(claim.split()) <= 8 or overlap_n >= 2 or overlap_score >= 20:
+                phrase_score = exact_phrase_score(claim, passage)
+            else:
+                phrase_score = 0
+
+            score = (overlap_score * 2) + phrase_score
+
             if phrase_score >= 175:
                 score += 35
 
@@ -4403,9 +4475,10 @@ def search_uploaded_article_library(claims, uploaded_article_files, article_text
                 score += 20
 
             fragment_support = []
-            for fragment in claim_fragments:
-                frag_phrase = exact_phrase_score(fragment, passage)
-                frag_overlap = term_overlap_score(fragment, passage)
+            for fragment, fragment_terms in fragment_meta:
+                frag_overlap_n = _overlap_count(fragment_terms, passage_terms)
+                frag_overlap = round((frag_overlap_n / max(len(fragment_terms), 1)) * 100, 1) if fragment_terms else 0.0
+                frag_phrase = exact_phrase_score(fragment, passage) if (frag_overlap_n >= 2 or frag_overlap >= 30) else 0
                 if frag_phrase >= 120 or frag_overlap >= 45:
                     fragment_support.append(fragment)
 
@@ -4416,27 +4489,20 @@ def search_uploaded_article_library(claims, uploaded_article_files, article_text
             if keywords:
                 score += term_overlap_score(keywords, passage)
 
-            section_label = item.get("section_label") or classify_passage_section(passage)
-
-            # Strongly de-bias abstract/introduction unless we have a true exact overlap.
-            if section_label in {"abstract", "introduction"} and support_type != "Exact":
-                continue
-
-            # Remove abstract/introduction bias and prefer body-like sections.
+            section_label = indexed["section_label"]
             if section_label == "abstract":
-                score -= 40
-            elif section_label == "introduction":
                 score -= 20
+            elif section_label == "introduction":
+                score -= 10
             elif section_label in {"methods", "results", "discussion", "conclusion", "body"}:
                 score += 10
 
-            # Prefer annotated locations when available.
             if item.get("page_number") is not None:
                 score += 15
             if item.get("passage_number") is not None:
                 score += 5
 
-            if score >= chunk_threshold and coverage_count > 0:
+            if score >= adaptive_threshold or (coverage_count > 0 and score >= adaptive_threshold - 10):
                 scored.append({
                     "claim_number": claim_number,
                     "claim": claim,
@@ -4460,24 +4526,16 @@ def search_uploaded_article_library(claims, uploaded_article_files, article_text
                     "score": round(score, 1),
                 })
 
-        # If no chunks pass threshold, keep closest chunk(s) so the UI can show fallback language.
-        if not scored and article_passages:
+        # Fallback always returns top candidates if threshold not met.
+        if not scored:
             fallback_scored = []
-            body_fallback_scored = []
-            for item in article_passages:
-                passage = item["passage"]
+            for indexed in candidate_pool:
+                item = indexed["item"]
+                passage = indexed["passage"]
                 overlap_score = term_overlap_score(claim, passage)
                 phrase_score = exact_phrase_score(claim, passage)
                 score = overlap_score * 2 + phrase_score
-                support_type = support_type_label(claim, passage)
-                section_label = item.get("section_label") or classify_passage_section(passage)
-                fragment_support = []
-                for fragment in claim_fragments:
-                    frag_phrase = exact_phrase_score(fragment, passage)
-                    frag_overlap = term_overlap_score(fragment, passage)
-                    if frag_phrase >= 120 or frag_overlap >= 45:
-                        fragment_support.append(fragment)
-                candidate = {
+                fallback_scored.append({
                     "claim_number": claim_number,
                     "claim": claim,
                     "source_name": item["source_name"],
@@ -4491,43 +4549,36 @@ def search_uploaded_article_library(claims, uploaded_article_files, article_text
                     "sentence_number": item.get("sentence_number"),
                     "line_range": "",
                     "passage": passage,
-                    "support_type": support_type,
-                    "coverage_count": len(fragment_support),
-                    "fragment_support": fragment_support,
-                    "section_label": section_label,
+                    "support_type": support_type_label(claim, passage),
+                    "coverage_count": 0,
+                    "fragment_support": [],
+                    "section_label": indexed["section_label"],
                     "overlap_score": round(overlap_score, 1),
                     "phrase_score": round(phrase_score, 1),
                     "score": round(score, 1),
-                }
-                fallback_scored.append(candidate)
-                if section_label not in {"abstract", "introduction"}:
-                    body_fallback_scored.append(candidate)
-
-            target_pool = body_fallback_scored if body_fallback_scored else fallback_scored
-            target_pool.sort(key=lambda row: (row.get("coverage_count", 0), row["score"]), reverse=True)
-            scored = target_pool[:top_candidates]
+                })
+            fallback_scored.sort(key=lambda row: row["score"], reverse=True)
+            scored = fallback_scored[:top_candidates]
 
         scored.sort(key=lambda row: (row.get("coverage_count", 0), row["score"]), reverse=True)
 
-        if scored:
-            selected = []
-            seen_locations = set()
-            for row in scored:
-                location_key = (row.get("source_name"), row.get("page_number"), row.get("paragraph_number"))
-                if location_key in seen_locations:
-                    continue
-                seen_locations.add(location_key)
-                selected.append(row)
-                if len(selected) >= min(top_candidates, max_results_per_claim):
-                    break
+        selected = []
+        seen_locations = set()
+        for row in scored:
+            location_key = (row.get("source_name"), row.get("page_number"), row.get("paragraph_number"))
+            if location_key in seen_locations:
+                continue
+            seen_locations.add(location_key)
+            selected.append(row)
+            if len(selected) >= min(top_candidates, max_results_per_claim):
+                break
 
+        if selected:
             all_supported_fragments = set()
             for row in selected:
                 all_supported_fragments.update([clean_text(f).lower() for f in row.get("fragment_support", []) if clean_text(f)])
             composite_support = len(all_supported_fragments) >= 2 and len(claim_fragments) >= 2
-            reviewer_note = ""
-            if composite_support:
-                reviewer_note = "Claim appears to be a paraphrase assembled from multiple nearby passages rather than a direct quote."
+            reviewer_note = "Claim appears to be a paraphrase assembled from multiple nearby passages rather than a direct quote." if composite_support else ""
 
             for rank_index, match in enumerate(selected, start=1):
                 status = attribution_status(match["score"], match["passage"], claim=claim)
@@ -4552,7 +4603,7 @@ def search_uploaded_article_library(claims, uploaded_article_files, article_text
                     score=match["score"],
                     supporting_passage=match["passage"],
                     citation=match["source_name"],
-                    recommendation="This searches the actual uploaded article body. Verify citation details before anchoring.",
+                    recommendation="This searches the uploaded full text. Verify citation details before final use.",
                     page_number=match.get("page_number"),
                     paragraph_number=match.get("paragraph_number"),
                     line_range=match.get("line_range", ""),
@@ -4577,7 +4628,7 @@ def search_uploaded_article_library(claims, uploaded_article_files, article_text
                 retrieval_type="No local passage match",
                 score=0,
                 citation="No uploaded article passage matched this claim.",
-                recommendation="Upload the full article PDF/text from publisher access or the source file.",
+                recommendation="Upload OCR-readable full text or refine statement wording.",
             ))
 
     return rows
@@ -4602,39 +4653,39 @@ def get_oa_status_info(oa_status):
     if not oa_status:
         return {
             "label": "Unknown",
-            "meaning": "Status not available",
+            "meaning": "Open-access status not available.",
             "bg": "#6b7280",
             "text": "#ffffff",
         }
 
     mapping = {
         "green": {
-            "label": "Green (Unlocked)",
-            "meaning": "Free full text available",
+            "label": "Open Access (Green)",
+            "meaning": "Free full text available (repository/archive copy).",
             "bg": "#16a34a",
             "text": "#ffffff",
         },
         "gold": {
-            "label": "Gold",
-            "meaning": "Published as open access",
+            "label": "Open Access (Gold)",
+            "meaning": "Free full text available on the publisher site.",
             "bg": "#ca8a04",
             "text": "#ffffff",
         },
         "bronze": {
-            "label": "Bronze",
-            "meaning": "Free to read, but not clearly licensed",
+            "label": "Free to Read (Bronze)",
+            "meaning": "Free full text available to read; reuse license may be unclear.",
             "bg": "#b45309",
             "text": "#ffffff",
         },
         "closed": {
-            "label": "Closed",
-            "meaning": "No free version found",
+            "label": "Closed (OA)",
+            "meaning": "No free OA full text identified. Publisher full text may still exist (subscription/login may be required).",
             "bg": "#dc2626",
             "text": "#ffffff",
         },
         "hybrid": {
-            "label": "Hybrid",
-            "meaning": "Publisher-hosted open access under a hybrid model",
+            "label": "Open Access (Hybrid)",
+            "meaning": "Free full text available for this article on publisher site under hybrid model.",
             "bg": "#2563eb",
             "text": "#ffffff",
         },
@@ -4644,7 +4695,7 @@ def get_oa_status_info(oa_status):
         oa_status.lower(),
         {
             "label": oa_status.title(),
-            "meaning": "Open-access status available",
+            "meaning": "Open-access status available.",
             "bg": "#6b7280",
             "text": "#ffffff",
         },
@@ -4672,6 +4723,15 @@ def render_status_badge(oa_status):
     </div>
     """
     st.markdown(badge_html, unsafe_allow_html=True)
+
+
+def render_url_link(label, value):
+    """Render URL/DOI values as clickable links when possible."""
+    url = to_clickable_url(value)
+    if url and re.match(r"^https?://", url, flags=re.IGNORECASE):
+        st.markdown(f"**{label}:** [{url}]({url})")
+    elif value:
+        st.write(f"**{label}:** {value}")
 
 
 def fetch_url_for_copyright(url):
@@ -4724,9 +4784,84 @@ def extract_page_metadata_for_copyright(html, url):
     return {
         "title": page_title,
         "domain": get_domain(url),
+        "page_url": url,
         "meta_tags": meta_tags,
         "links": links,
         "text_sample": body_text[:8000],
+    }
+
+
+def detect_full_text_availability(crossref_info, page_data, unpaywall_info):
+    """Distinguish free OA full text from publisher full text availability."""
+    best_oa_url = get_best_oa_url(unpaywall_info)
+    has_free_oa_full_text = bool(best_oa_url)
+
+    candidates = []
+
+    landing_url = clean_text((crossref_info or {}).get("url", ""))
+    doi_clean = normalize_doi((crossref_info or {}).get("doi", ""))
+
+    if landing_url:
+        candidates.append(landing_url)
+        if doi_clean and "/doi/" in landing_url:
+            parsed = urlparse(landing_url)
+            base = f"{parsed.scheme}://{parsed.netloc}"
+            candidates.extend([
+                f"{base}/doi/epdf/{doi_clean}",
+                f"{base}/doi/pdf/{doi_clean}",
+            ])
+
+    if page_data:
+        base_url = clean_text(page_data.get("page_url", "")) or landing_url
+        for key, value in page_data.get("meta_tags", []):
+            key_l = (key or "").lower()
+            value_u = clean_text(value)
+            if not value_u:
+                continue
+            if "pdf" in key_l or "citation_pdf_url" in key_l:
+                candidates.append(urljoin(base_url, value_u))
+
+        for rel, href in page_data.get("links", []):
+            href_u = clean_text(href)
+            if not href_u:
+                continue
+            abs_u = urljoin(base_url, href_u)
+            low = abs_u.lower()
+            rel_l = (rel or "").lower()
+            if any(t in low for t in ["/epdf/", "/pdf/", "articlepdf", "fulltext", "full-text", "download"]):
+                candidates.append(abs_u)
+            elif "pdf" in rel_l:
+                candidates.append(abs_u)
+
+    normalized = []
+    seen = set()
+    for c in candidates:
+        c = to_clickable_url(c)
+        if not c or not re.match(r"^https?://", c, flags=re.IGNORECASE):
+            continue
+        if is_permissions_portal_url(c):
+            continue
+        k = c.lower().strip()
+        if k not in seen:
+            seen.add(k)
+            normalized.append(c)
+
+    def rank_url(u):
+        l = u.lower()
+        if "/epdf/" in l or "/pdf/" in l or "articlepdf" in l:
+            return 3
+        if "fulltext" in l or "full-text" in l:
+            return 2
+        return 1
+
+    normalized.sort(key=rank_url, reverse=True)
+    publisher_full_text_url = normalized[0] if normalized else ""
+    has_publisher_full_text = bool(publisher_full_text_url)
+    return {
+        "has_free_oa_full_text": has_free_oa_full_text,
+        "has_publisher_full_text": bool(publisher_full_text_url),
+        "best_oa_url": best_oa_url,
+        "publisher_full_text_url": publisher_full_text_url,
     }
 
 
@@ -4921,40 +5056,56 @@ def get_intended_use_guidance_for_copyright(category, intended_use, permissions_
     return ("info", f"For '{intended_use}', the available signals are not definitive. Review publisher-specific permissions before reuse.")
 
 
-def build_copyright_report(input_type, user_input, intended_use, crossref_info, unpaywall_info, category, summary, confidence):
+def build_copyright_report(input_type, user_input, intended_use, crossref_info, unpaywall_info, category, summary, confidence, full_text_info=None):
+    full_text_info = full_text_info or {}
+    best_oa_url = full_text_info.get("best_oa_url") or get_best_oa_url(unpaywall_info)
+    publisher_full_text_url = full_text_info.get("publisher_full_text_url", "")
+
     lines = [
-        "Enterprise Copyright Assessment Report",
-        f"Timestamp (UTC): {now_utc()}",
-        f"Input type: {input_type}",
-        f"Input value: {user_input}",
-        f"Intended use: {intended_use}",
+        "### Enterprise Copyright Assessment Report",
+        f"- **Timestamp (UTC):** {now_utc()}",
+        f"- **Input type:** {input_type}",
+        f"- **Input value:** {user_input}",
+        f"- **Intended use:** {intended_use}",
         "",
-        f"Assessment category: {category}",
-        f"Confidence: {confidence}",
+        f"- **Assessment category:** {category}",
+        f"- **Confidence:** {confidence}",
         "",
-        "Summary:",
+        "#### Summary",
         summary,
         "",
-        "Practical interpretation:",
+        "#### Practical interpretation",
         "- Sharing a link is generally safer than reposting the full article.",
         "- Reuse of figures, tables, or substantial excerpts may require permission.",
         "- Open access does not always equal unrestricted commercial reuse.",
-        "- This tool supports review but is not a substitute for legal advice or publisher terms.",
     ]
 
     if crossref_info:
         lines.extend([
             "",
-            "Article identified:",
-            f"- Title: {crossref_info.get('title', 'Unknown')}",
-            f"- DOI: {crossref_info.get('doi', 'Unknown')}",
-            f"- Journal: {crossref_info.get('journal', 'Unknown')}",
-            f"- Publisher: {crossref_info.get('publisher', 'Unknown')}",
+            "#### Article identified",
+            f"- **Title:** {crossref_info.get('title', 'Unknown')}",
+            f"- **Journal:** {crossref_info.get('journal', 'Unknown')}",
+            f"- **Publisher:** {crossref_info.get('publisher', 'Unknown')}",
+        ])
+        doi = crossref_info.get("doi", "")
+        if doi:
+            doi_url = canonical_doi_url(doi)
+            lines.append(f"- **DOI:** [{doi}]({doi_url})")
+        if crossref_info.get("url"):
+            lines.append(f"- **Publisher page:** [{crossref_info.get('url')}]({crossref_info.get('url')})")
+
+    if best_oa_url:
+        lines.extend([
+            "",
+            "#### Full-text links",
+            f"- **Free OA full text:** [{best_oa_url}]({best_oa_url})",
         ])
 
-    best_url = get_best_oa_url(unpaywall_info)
-    if best_url:
-        lines.extend(["", "Available source:", f"- {best_url}"])
+    if publisher_full_text_url and publisher_full_text_url != best_oa_url:
+        lines.append(
+            f"- **Publisher full text (may require subscription/login):** [{publisher_full_text_url}]({publisher_full_text_url})"
+        )
 
     return "\n".join(lines)
 
@@ -6829,6 +6980,13 @@ with tab_local:
         key=reset_key("local_keywords"),
     )
 
+    local_single_claim = st.checkbox(
+        "Treat pasted text as a single claim",
+        value=True,
+        key=reset_key("local_single_claim"),
+        help="When enabled, the full pasted statement/paragraph is processed as one claim.",
+    )
+
     pasted_article_text = st.text_area(
         "Or paste full-text source content",
         height=180,
@@ -6837,10 +6995,10 @@ with tab_local:
     )
 
     local_results_per_claim = st.slider(
-        "Results to show",
+        "Top source matches per claim",
         1,
         10,
-        5,
+        1,
         key="local_results_per_claim"
     )
 
@@ -6870,9 +7028,14 @@ with tab_local:
             st.warning("Please complete the required rights gate for uploaded files before searching.")
         else:
             local_search_content = local_claim_content.strip() if local_claim_content.strip() else local_keywords.strip()
-            claims = split_into_claims(local_search_content, max_claims=1)
-            if not claims and local_search_content:
-                claims = [local_search_content]
+
+            if local_single_claim:
+                single = clean_text(local_search_content)
+                claims = [single] if single else []
+            else:
+                claims = split_into_claims(local_search_content, max_claims=5)
+                if not claims and local_search_content:
+                    claims = [local_search_content]
 
             with st.spinner("Searching inside provided full text..."):
                 rows = search_uploaded_article_library(
@@ -6951,6 +7114,7 @@ with tab_copyright:
                 page_data = None
                 page_clues = []
                 tdm_result = None
+                full_text_info = {}
 
                 with st.spinner("Running copyright assessment..."):
                     if copyright_input_type == "URL":
@@ -7014,6 +7178,8 @@ with tab_copyright:
                         unpaywall_info,
                     )
 
+                    full_text_info = detect_full_text_availability(crossref_info, page_data, unpaywall_info)
+
                     report = build_copyright_report(
                         copyright_input_type,
                         copyright_user_input,
@@ -7023,6 +7189,7 @@ with tab_copyright:
                         category,
                         summary,
                         confidence,
+                        full_text_info=full_text_info,
                     )
 
                     if run_tmdi_check:
@@ -7060,14 +7227,16 @@ with tab_copyright:
                         "best_oa_url": get_best_oa_url(unpaywall_info),
                     }
 
-                    st.session_state.copyright_log.append(sanitize_rows_for_log([log_row])[0])
-
                 oa_status = ""
-                available_url = ""
+                available_url = full_text_info.get("best_oa_url", "")
+                publisher_full_text_url = full_text_info.get("publisher_full_text_url", "")
+                has_free_oa_full_text = bool(full_text_info.get("has_free_oa_full_text"))
+                has_publisher_full_text = bool(full_text_info.get("has_publisher_full_text"))
 
                 if unpaywall_info and unpaywall_info.get("status") == "available":
                     oa_status = unpaywall_info.get("oa_status", "")
-                    available_url = get_best_oa_url(unpaywall_info)
+                if unpaywall_info and unpaywall_info.get("status") == "available":
+                    oa_status = unpaywall_info.get("oa_status", "")
 
                 left, right = st.columns([2, 1])
 
@@ -7080,6 +7249,9 @@ with tab_copyright:
                     if oa_status:
                         st.subheader("Open Access Status")
                         render_status_badge(oa_status)
+
+                        if oa_status.lower() == "closed" and publisher_full_text_url:
+                            st.info("OA is Closed (no free OA copy identified), but publisher full text appears available below.")
 
                     guidance_type, guidance_text = get_intended_use_guidance_for_copyright(
                         category,
@@ -7097,11 +7269,17 @@ with tab_copyright:
                     elif guidance_type == "error":
                         st.error(guidance_text)
                     else:
-                        st.info(guidance_text)
+                        pass
+
+                    st.subheader("Full Text Availability")
+                    st.write(f"**Free OA full text:** {'Yes' if has_free_oa_full_text else 'No'}")
+                    st.write(f"**Publisher full text (may require login/subscription):** {'Yes' if has_publisher_full_text else 'No'}")
 
                     if available_url and not is_permissions_portal_url(available_url):
-                        st.subheader("Available Article Source")
-                        st.write(f"[Open available article source]({available_url})")
+                        render_url_link("Free OA full text", available_url)
+
+                    if publisher_full_text_url and publisher_full_text_url != available_url:
+                        render_url_link("Publisher full text (may require login/subscription)", publisher_full_text_url)
 
                     if run_tmdi_check and tdm_result:
                         st.subheader("TDMI (TDM/AI-Use) Check")
@@ -7117,7 +7295,7 @@ with tab_copyright:
                         st.write(f"- {finding}")
 
                     st.subheader("Plain-English Report")
-                    st.text(report)
+                    st.markdown(report)
 
                 with right:
                     st.subheader("Article")
@@ -7130,7 +7308,9 @@ with tab_copyright:
                         if crossref_info.get("published"):
                             st.write(f"**Published:** {crossref_info.get('published')}")
                         if crossref_info.get("doi"):
-                            st.write(f"**DOI:** {crossref_info.get('doi')}")
+                            render_url_link("DOI", canonical_doi_url(crossref_info.get("doi")))
+                        if crossref_info.get("url"):
+                            render_url_link("Publisher page", crossref_info.get("url"))
                     elif page_data:
                         st.write(f"**Title:** {page_data.get('title', '')}")
                         if page_data.get("domain"):
