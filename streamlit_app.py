@@ -2341,6 +2341,16 @@ def keyword_tokens(text):
     return [word for word in words if word not in stop_words]
 
 
+def _token_set(text):
+    return set(keyword_tokens(text))
+
+
+def _overlap_count(left_terms, right_terms):
+    if not left_terms or not right_terms:
+        return 0
+    return len(left_terms.intersection(right_terms))
+
+
 def term_overlap_score(claim, target):
     claim_terms = set(keyword_tokens(claim))
     target_terms = set(keyword_tokens(target))
@@ -4307,8 +4317,8 @@ def split_article_into_passages(article_text, source_name=""):
 def search_uploaded_article_library(claims, uploaded_article_files, article_text_box="", keywords="", max_results_per_claim=5):
     article_passages = []
     restriction_hits = []
-    chunk_threshold = 70.0
     top_candidates = 5
+    max_passages_per_source = 6000  # hard cap to keep runtime predictable on very large PDFs
 
     for uploaded_file in uploaded_article_files or []:
         article_text = extract_text_from_upload(uploaded_file)
@@ -4323,7 +4333,11 @@ def search_uploaded_article_library(claims, uploaded_article_files, article_text
                 }
             )
         source_name = uploaded_file.name
-        article_passages.extend(split_article_into_passages(article_text, source_name=source_name))
+        source_passages = split_article_into_passages(article_text, source_name=source_name)
+        if len(source_passages) > max_passages_per_source:
+            source_passages = source_passages[:max_passages_per_source]
+            st.info(f"{source_name}: large file detected. Scanning first {max_passages_per_source} passages for faster results.")
+        article_passages.extend(source_passages)
 
     if restriction_hits:
         st.warning("Warning: one or more uploaded references contain AI-use, AI-training, text/data-mining, or confidentiality restriction language.")
@@ -4342,22 +4356,80 @@ def search_uploaded_article_library(claims, uploaded_article_files, article_text
                         st.write(f"- {match}")
 
     if article_text_box.strip():
-        article_passages.extend(split_article_into_passages(article_text_box, source_name="Pasted article/full text"))
+        pasted_passages = split_article_into_passages(article_text_box, source_name="Pasted article/full text")
+        if len(pasted_passages) > max_passages_per_source:
+            pasted_passages = pasted_passages[:max_passages_per_source]
+            st.info(f"Pasted text is large. Scanning first {max_passages_per_source} passages for faster results.")
+        article_passages.extend(pasted_passages)
 
     rows = []
 
+    if not article_passages:
+        for claim_number, claim in enumerate(claims, start=1):
+            rows.append(make_attribution_row(
+                workflow="Local full-text source attribution",
+                claim_number=claim_number,
+                claim=claim,
+                source_status="NOT VERIFIED",
+                article_title="No extractable text found",
+                source_database="Uploaded article library",
+                retrieval_type="No local passage match",
+                score=0,
+                citation="No extractable text found in uploaded/pasted sources (possible scanned PDF/OCR issue).",
+                recommendation="Try an OCR-processed PDF/TXT or paste machine-readable full text.",
+            ))
+        return rows
+
+    # Precompute tokens once per passage for speed.
+    indexed_passages = []
+    for item in article_passages:
+        passage = item.get("passage", "")
+        indexed_passages.append({
+            "item": item,
+            "passage": passage,
+            "terms": _token_set(passage),
+            "section_label": item.get("section_label") or classify_passage_section(passage),
+        })
+
     for claim_number, claim in enumerate(claims, start=1):
         claim_fragments = extract_claim_fragments(claim)
+        claim_terms = _token_set(claim)
+        if not claim_terms and keywords:
+            claim_terms = _token_set(keywords)
+
+        fragment_meta = [(fragment, _token_set(fragment)) for fragment in claim_fragments]
+        adaptive_threshold = 40 if len(clean_text(claim).split()) < 18 else 50
         scored = []
 
-        for item in article_passages:
-            passage = item["passage"]
-            overlap_score = term_overlap_score(claim, passage)
-            phrase_score = exact_phrase_score(claim, passage)
-            score = overlap_score * 2
-            score += phrase_score
+        # Fast prefilter before expensive phrase scoring.
+        if claim_terms:
+            ranked_prefilter = sorted(
+                indexed_passages,
+                key=lambda p: _overlap_count(claim_terms, p["terms"]),
+                reverse=True,
+            )
+            candidate_pool = [p for p in ranked_prefilter if _overlap_count(claim_terms, p["terms"]) > 0][:1500]
+            if not candidate_pool:
+                candidate_pool = ranked_prefilter[:800]
+        else:
+            candidate_pool = indexed_passages[:800]
 
-            # Prefer chunks with exact phrase overlap.
+        for indexed in candidate_pool:
+            item = indexed["item"]
+            passage = indexed["passage"]
+            passage_terms = indexed["terms"]
+
+            overlap_n = _overlap_count(claim_terms, passage_terms)
+            overlap_score = round((overlap_n / max(len(claim_terms), 1)) * 100, 1) if claim_terms else term_overlap_score(claim, passage)
+
+            # Only run expensive phrase match when there is minimal lexical evidence.
+            if len(claim.split()) <= 8 or overlap_n >= 2 or overlap_score >= 20:
+                phrase_score = exact_phrase_score(claim, passage)
+            else:
+                phrase_score = 0
+
+            score = (overlap_score * 2) + phrase_score
+
             if phrase_score >= 175:
                 score += 35
 
@@ -4368,9 +4440,10 @@ def search_uploaded_article_library(claims, uploaded_article_files, article_text
                 score += 20
 
             fragment_support = []
-            for fragment in claim_fragments:
-                frag_phrase = exact_phrase_score(fragment, passage)
-                frag_overlap = term_overlap_score(fragment, passage)
+            for fragment, fragment_terms in fragment_meta:
+                frag_overlap_n = _overlap_count(fragment_terms, passage_terms)
+                frag_overlap = round((frag_overlap_n / max(len(fragment_terms), 1)) * 100, 1) if fragment_terms else 0.0
+                frag_phrase = exact_phrase_score(fragment, passage) if (frag_overlap_n >= 2 or frag_overlap >= 30) else 0
                 if frag_phrase >= 120 or frag_overlap >= 45:
                     fragment_support.append(fragment)
 
@@ -4381,27 +4454,20 @@ def search_uploaded_article_library(claims, uploaded_article_files, article_text
             if keywords:
                 score += term_overlap_score(keywords, passage)
 
-            section_label = item.get("section_label") or classify_passage_section(passage)
-
-            # Strongly de-bias abstract/introduction unless we have a true exact overlap.
-            if section_label in {"abstract", "introduction"} and support_type != "Exact":
-                continue
-
-            # Remove abstract/introduction bias and prefer body-like sections.
+            section_label = indexed["section_label"]
             if section_label == "abstract":
-                score -= 40
-            elif section_label == "introduction":
                 score -= 20
+            elif section_label == "introduction":
+                score -= 10
             elif section_label in {"methods", "results", "discussion", "conclusion", "body"}:
                 score += 10
 
-            # Prefer annotated locations when available.
             if item.get("page_number") is not None:
                 score += 15
             if item.get("passage_number") is not None:
                 score += 5
 
-            if score >= chunk_threshold and coverage_count > 0:
+            if score >= adaptive_threshold or (coverage_count > 0 and score >= adaptive_threshold - 10):
                 scored.append({
                     "claim_number": claim_number,
                     "claim": claim,
@@ -4424,24 +4490,16 @@ def search_uploaded_article_library(claims, uploaded_article_files, article_text
                     "score": round(score, 1),
                 })
 
-        # If no chunks pass threshold, keep closest chunk(s) so the UI can show fallback language.
-        if not scored and article_passages:
+        # Fallback always returns top candidates if threshold not met.
+        if not scored:
             fallback_scored = []
-            body_fallback_scored = []
-            for item in article_passages:
-                passage = item["passage"]
+            for indexed in candidate_pool:
+                item = indexed["item"]
+                passage = indexed["passage"]
                 overlap_score = term_overlap_score(claim, passage)
                 phrase_score = exact_phrase_score(claim, passage)
                 score = overlap_score * 2 + phrase_score
-                support_type = support_type_label(claim, passage)
-                section_label = item.get("section_label") or classify_passage_section(passage)
-                fragment_support = []
-                for fragment in claim_fragments:
-                    frag_phrase = exact_phrase_score(fragment, passage)
-                    frag_overlap = term_overlap_score(fragment, passage)
-                    if frag_phrase >= 120 or frag_overlap >= 45:
-                        fragment_support.append(fragment)
-                candidate = {
+                fallback_scored.append({
                     "claim_number": claim_number,
                     "claim": claim,
                     "source_name": item["source_name"],
@@ -4454,53 +4512,43 @@ def search_uploaded_article_library(claims, uploaded_article_files, article_text
                     "sentence_number": item.get("sentence_number"),
                     "line_range": "",
                     "passage": passage,
-                    "support_type": support_type,
-                    "coverage_count": len(fragment_support),
-                    "fragment_support": fragment_support,
-                    "section_label": section_label,
+                    "support_type": support_type_label(claim, passage),
+                    "coverage_count": 0,
+                    "fragment_support": [],
+                    "section_label": indexed["section_label"],
                     "overlap_score": round(overlap_score, 1),
                     "phrase_score": round(phrase_score, 1),
                     "score": round(score, 1),
-                }
-                fallback_scored.append(candidate)
-                if section_label not in {"abstract", "introduction"}:
-                    body_fallback_scored.append(candidate)
-
-            target_pool = body_fallback_scored if body_fallback_scored else fallback_scored
-            target_pool.sort(key=lambda row: (row.get("coverage_count", 0), row["score"]), reverse=True)
-            scored = target_pool[:top_candidates]
+                })
+            fallback_scored.sort(key=lambda row: row["score"], reverse=True)
+            scored = fallback_scored[:top_candidates]
 
         scored.sort(key=lambda row: (row.get("coverage_count", 0), row["score"]), reverse=True)
 
-        if scored:
-            selected = []
-            seen_locations = set()
-            for row in scored:
-                location_key = (row.get("source_name"), row.get("page_number"), row.get("paragraph_number"))
-                if location_key in seen_locations:
-                    continue
-                seen_locations.add(location_key)
-                selected.append(row)
-                if len(selected) >= min(top_candidates, max_results_per_claim):
-                    break
+        selected = []
+        seen_locations = set()
+        for row in scored:
+            location_key = (row.get("source_name"), row.get("page_number"), row.get("paragraph_number"))
+            if location_key in seen_locations:
+                continue
+            seen_locations.add(location_key)
+            selected.append(row)
+            if len(selected) >= min(top_candidates, max_results_per_claim):
+                break
 
+        if selected:
             all_supported_fragments = set()
             for row in selected:
                 all_supported_fragments.update([clean_text(f).lower() for f in row.get("fragment_support", []) if clean_text(f)])
             composite_support = len(all_supported_fragments) >= 2 and len(claim_fragments) >= 2
-            reviewer_note = ""
-            if composite_support:
-                reviewer_note = "Claim appears to be a paraphrase assembled from multiple nearby passages rather than a direct quote."
+            reviewer_note = "Claim appears to be a paraphrase assembled from multiple nearby passages rather than a direct quote." if composite_support else ""
 
             for rank_index, match in enumerate(selected, start=1):
                 status = attribution_status(match["score"], match["passage"], claim=claim)
                 location = f"Local passage #{match['passage_number']}"
                 if match.get("page_number"):
                     page_para = match.get("paragraph_number")
-                    if page_para is not None:
-                        location = f"Page {match['page_number']}, Paragraph {page_para}"
-                    else:
-                        location = f"Page {match['page_number']}, Paragraph ?"
+                    location = f"Page {match['page_number']}, Paragraph {page_para if page_para is not None else '?'}"
 
                 rows.append(make_attribution_row(
                     workflow="Local full-text source attribution",
@@ -4513,7 +4561,7 @@ def search_uploaded_article_library(claims, uploaded_article_files, article_text
                     score=match["score"],
                     supporting_passage=match["passage"],
                     citation=match["source_name"],
-                    recommendation="This searches the actual uploaded article body. Verify citation details before anchoring.",
+                    recommendation="This searches the uploaded full text. Verify citation details before final use.",
                     page_number=match.get("page_number"),
                     paragraph_number=match.get("paragraph_number"),
                     line_range=match.get("line_range", ""),
@@ -4534,7 +4582,7 @@ def search_uploaded_article_library(claims, uploaded_article_files, article_text
                 retrieval_type="No local passage match",
                 score=0,
                 citation="No uploaded article passage matched this claim.",
-                recommendation="Upload the full article PDF/text from publisher access or the source file.",
+                recommendation="Upload OCR-readable full text or refine statement wording.",
             ))
 
     return rows
@@ -6884,6 +6932,13 @@ with tab_local:
         key=reset_key("local_keywords"),
     )
 
+    local_single_claim = st.checkbox(
+        "Treat pasted text as a single claim",
+        value=True,
+        key=reset_key("local_single_claim"),
+        help="When enabled, the full pasted statement/paragraph is processed as one claim.",
+    )
+
     pasted_article_text = st.text_area(
         "Or paste full-text source content",
         height=180,
@@ -6892,10 +6947,10 @@ with tab_local:
     )
 
     local_results_per_claim = st.slider(
-        "Results to show",
+        "Top source matches per claim",
         1,
         10,
-        5,
+        1,
         key="local_results_per_claim"
     )
 
@@ -6925,9 +6980,14 @@ with tab_local:
             st.warning("Please complete the required rights gate for uploaded files before searching.")
         else:
             local_search_content = local_claim_content.strip() if local_claim_content.strip() else local_keywords.strip()
-            claims = split_into_claims(local_search_content, max_claims=1)
-            if not claims and local_search_content:
-                claims = [local_search_content]
+
+            if local_single_claim:
+                single = clean_text(local_search_content)
+                claims = [single] if single else []
+            else:
+                claims = split_into_claims(local_search_content, max_claims=5)
+                if not claims and local_search_content:
+                    claims = [local_search_content]
 
             with st.spinner("Searching inside provided full text..."):
                 rows = search_uploaded_article_library(
