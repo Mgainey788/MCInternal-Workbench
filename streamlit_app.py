@@ -4559,39 +4559,39 @@ def get_oa_status_info(oa_status):
     if not oa_status:
         return {
             "label": "Unknown",
-            "meaning": "Status not available",
+            "meaning": "Open-access status not available.",
             "bg": "#6b7280",
             "text": "#ffffff",
         }
 
     mapping = {
         "green": {
-            "label": "Green (Unlocked)",
-            "meaning": "Free full text available",
+            "label": "Open Access (Green)",
+            "meaning": "Full text available (repository or archive copy).",
             "bg": "#16a34a",
             "text": "#ffffff",
         },
         "gold": {
-            "label": "Gold",
-            "meaning": "Published as open access",
+            "label": "Open Access (Gold)",
+            "meaning": "Full text available on the publisher site.",
             "bg": "#ca8a04",
             "text": "#ffffff",
         },
         "bronze": {
-            "label": "Bronze",
-            "meaning": "Free to read, but not clearly licensed",
+            "label": "Free to Read (Bronze)",
+            "meaning": "Full text available to read; reuse license may be unclear.",
             "bg": "#b45309",
             "text": "#ffffff",
         },
         "closed": {
             "label": "Closed",
-            "meaning": "No free version found",
+            "meaning": "No free full text available was identified.",
             "bg": "#dc2626",
             "text": "#ffffff",
         },
         "hybrid": {
-            "label": "Hybrid",
-            "meaning": "Publisher-hosted open access under a hybrid model",
+            "label": "Open Access (Hybrid)",
+            "meaning": "Full text available on publisher site under a hybrid model.",
             "bg": "#2563eb",
             "text": "#ffffff",
         },
@@ -4601,7 +4601,7 @@ def get_oa_status_info(oa_status):
         oa_status.lower(),
         {
             "label": oa_status.title(),
-            "meaning": "Open-access status available",
+            "meaning": "Open-access status available.",
             "bg": "#6b7280",
             "text": "#ffffff",
         },
@@ -4629,6 +4629,15 @@ def render_status_badge(oa_status):
     </div>
     """
     st.markdown(badge_html, unsafe_allow_html=True)
+
+
+def render_url_link(label, value):
+    """Render URL/DOI values as clickable links when possible."""
+    url = to_clickable_url(value)
+    if url and re.match(r"^https?://", url, flags=re.IGNORECASE):
+        st.markdown(f"**{label}:** [{url}]({url})")
+    elif value:
+        st.write(f"**{label}:** {value}")
 
 
 def fetch_url_for_copyright(url):
@@ -7056,7 +7065,7 @@ with tab_copyright:
 
                     if available_url and not is_permissions_portal_url(available_url):
                         st.subheader("Available Article Source")
-                        st.write(f"[Open available article source]({available_url})")
+                        render_url_link("Open available article source", available_url)
 
                     if run_tmdi_check and tdm_result:
                         st.subheader("TDMI (TDM/AI-Use) Check")
@@ -7085,7 +7094,9 @@ with tab_copyright:
                         if crossref_info.get("published"):
                             st.write(f"**Published:** {crossref_info.get('published')}")
                         if crossref_info.get("doi"):
-                            st.write(f"**DOI:** {crossref_info.get('doi')}")
+                            render_url_link("DOI", canonical_doi_url(crossref_info.get("doi")))
+                        if crossref_info.get("url"):
+                            render_url_link("Publisher page", crossref_info.get("url"))
                     elif page_data:
                         st.write(f"**Title:** {page_data.get('title', '')}")
                         if page_data.get("domain"):
