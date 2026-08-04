@@ -91,7 +91,7 @@ class SemanticLibrary:
         self._embedding_dim = 768
 
     # ----------------------------------------------------------
-    def _embed(self, texts: list[str]) -> list[list[float]] | None:
+    def _embed(self, texts: list[str]):
         if self._model is None:
             return None
         try:
@@ -7178,6 +7178,7 @@ with tab_copyright:
                         "oa_status": unpaywall_info.get("oa_status") if unpaywall_info else "",
                         "best_oa_url": get_best_oa_url(unpaywall_info),
                     }
+                    st.session_state.copyright_log.append(log_row)
 
                 oa_status = ""
                 available_url = full_text_info.get("best_oa_url", "")

@@ -1,6 +1,7 @@
 [server]
 headless = true
 address = "0.0.0.0"
+port = 8000
 maxUploadSize = 500
 maxMessageSize = 500
 enableCORS = true
@@ -8,10 +9,11 @@ enableXsrfProtection = true
 
 [browser]
 gatherUsageStats = false
-
+gatherUsageStats = false
 [theme]
 base = "light"
 primaryColor = "#1f4e79"
 backgroundColor = "#f5f8fc"
 secondaryBackgroundColor = "#ffffff"
+textColor = "#1f2937"
 textColor = "#1f2937"
