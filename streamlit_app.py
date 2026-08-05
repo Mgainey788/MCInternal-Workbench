@@ -4749,8 +4749,10 @@ def detect_full_text_availability(crossref_info, page_data, unpaywall_info):
     """Distinguish free OA full text from publisher full text availability."""
     best_oa_url = get_best_oa_url(unpaywall_info)
     has_free_oa_full_text = bool(best_oa_url)
+    free_oa_known = bool(unpaywall_info and unpaywall_info.get("status") == "available")
 
     candidates = []
+    pdf_candidates = []
 
     landing_url = clean_text((crossref_info or {}).get("url", ""))
     doi_clean = normalize_doi((crossref_info or {}).get("doi", ""))
@@ -4773,7 +4775,9 @@ def detect_full_text_availability(crossref_info, page_data, unpaywall_info):
             if not value_u:
                 continue
             if "pdf" in key_l or "citation_pdf_url" in key_l:
-                candidates.append(urljoin(base_url, value_u))
+                candidate_url = urljoin(base_url, value_u)
+                candidates.append(candidate_url)
+                pdf_candidates.append(candidate_url)
 
         for rel, href in page_data.get("links", []):
             href_u = clean_text(href)
@@ -4784,8 +4788,11 @@ def detect_full_text_availability(crossref_info, page_data, unpaywall_info):
             rel_l = (rel or "").lower()
             if any(t in low for t in ["/epdf/", "/pdf/", "articlepdf", "fulltext", "full-text", "download"]):
                 candidates.append(abs_u)
+                if any(t in low for t in ["/pdf/", "/epdf/", ".pdf", "articlepdf"]):
+                    pdf_candidates.append(abs_u)
             elif "pdf" in rel_l:
                 candidates.append(abs_u)
+                pdf_candidates.append(abs_u)
 
     normalized = []
     seen = set()
@@ -4810,12 +4817,41 @@ def detect_full_text_availability(crossref_info, page_data, unpaywall_info):
 
     normalized.sort(key=rank_url, reverse=True)
     publisher_full_text_url = normalized[0] if normalized else ""
+
     has_publisher_full_text = bool(publisher_full_text_url)
+    publisher_full_text_known = bool(landing_url or page_data)
+
+    pdf_link = ""
+    all_pdf_candidates = [best_oa_url] + pdf_candidates + normalized
+    for candidate in all_pdf_candidates:
+        if not candidate:
+            continue
+        low = candidate.lower()
+        if any(t in low for t in [".pdf", "/pdf", "/epdf", "articlepdf"]):
+            pdf_link = candidate
+            break
+
+    pdf_link_found = bool(pdf_link)
+
+    free_oa_status = "Unknown"
+    if free_oa_known:
+        free_oa_status = "Yes" if has_free_oa_full_text else "No"
+
+    publisher_full_text_status = "Unknown"
+    if publisher_full_text_known:
+        publisher_full_text_status = "Yes" if has_publisher_full_text else "No"
+
     return {
         "has_free_oa_full_text": has_free_oa_full_text,
         "has_publisher_full_text": bool(publisher_full_text_url),
+        "free_oa_known": free_oa_known,
+        "publisher_full_text_known": publisher_full_text_known,
+        "free_oa_status": free_oa_status,
+        "publisher_full_text_status": publisher_full_text_status,
         "best_oa_url": best_oa_url,
         "publisher_full_text_url": publisher_full_text_url,
+        "pdf_link_found": pdf_link_found,
+        "pdf_link": pdf_link,
     }
 
 
@@ -4869,149 +4905,448 @@ def detect_permissions_portal_for_copyright(crossref_info, page_clues):
     return False
 
 
-def calculate_copyright_confidence(input_type, crossref_info, page_clues, unpaywall_info):
-    score = 0
+def classify_license_type(license_text):
+    text = clean_text(license_text).lower()
+    if not text:
+        return "Not identified"
+    if "cc0" in text or "creativecommons.org/publicdomain/zero" in text:
+        return "CC0"
+    if "cc by-nc-nd" in text or "creativecommons.org/licenses/by-nc-nd" in text:
+        return "CC BY-NC-ND"
+    if "cc by-nc" in text or "creativecommons.org/licenses/by-nc" in text:
+        return "CC BY-NC"
+    if "cc by" in text or "creativecommons.org/licenses/by" in text or "creativecommons attribution" in text:
+        return "CC BY"
+    if "creative commons" in text:
+        return "other"
+    return "other"
 
-    if input_type == "DOI":
-        score += 45
-    elif input_type == "URL":
-        score += 30
-    elif input_type == "Title":
-        score += 20
 
-    if crossref_info and crossref_info.get("doi"):
-        score += 20
+def extract_license_signals(crossref_info, unpaywall_info, page_clues):
+    license_evidence = []
+    detected_types = []
 
-    if crossref_info and crossref_info.get("licenses"):
-        score += 15
+    for license_item in (crossref_info or {}).get("licenses", []) or []:
+        if isinstance(license_item, dict):
+            license_url = clean_text(license_item.get("URL", ""))
+            license_type = classify_license_type(license_url)
+            detected_types.append(license_type)
+            license_evidence.append({
+                "source": "Crossref",
+                "url": license_url,
+                "detail": f"Crossref license URL: {license_url or 'present'}",
+            })
 
     if unpaywall_info and unpaywall_info.get("status") == "available":
-        score += 10
+        unpaywall_license = clean_text(unpaywall_info.get("license", ""))
+        if unpaywall_license:
+            detected_types.append(classify_license_type(unpaywall_license))
+            license_evidence.append({
+                "source": "Unpaywall",
+                "url": "",
+                "detail": f"Unpaywall license metadata: {unpaywall_license}",
+            })
 
-    if page_clues:
-        score += min(len(page_clues) * 3, 10)
+        best_location = unpaywall_info.get("best_oa_location") or {}
+        for key in ["license", "version"]:
+            value = clean_text(best_location.get(key, ""))
+            if value:
+                detected_types.append(classify_license_type(value))
+                license_evidence.append({
+                    "source": "Unpaywall",
+                    "url": clean_text(best_location.get("url", "")) or clean_text(best_location.get("url_for_pdf", "")),
+                    "detail": f"Unpaywall OA location {key}: {value}",
+                })
 
-    if score >= 75:
+    for clue in page_clues or []:
+        detail = clean_text(clue.get("detail", ""))
+        if not detail:
+            continue
+        detail_l = detail.lower()
+        if (
+            "creative commons" in detail_l
+            or "cc by" in detail_l
+            or "creativecommons.org" in detail_l
+            or "open access" in detail_l
+            or "distributed under" in detail_l
+        ):
+            detected_types.append(classify_license_type(detail))
+            license_evidence.append({
+                "source": "Publisher webpage",
+                "url": "",
+                "detail": detail,
+            })
+
+    normalized_types = [t for t in detected_types if t and t != "Not identified"]
+    if "CC0" in normalized_types:
+        license_type = "CC0"
+    elif "CC BY-NC-ND" in normalized_types:
+        license_type = "CC BY-NC-ND"
+    elif "CC BY-NC" in normalized_types:
+        license_type = "CC BY-NC"
+    elif "CC BY" in normalized_types:
+        license_type = "CC BY"
+    elif normalized_types:
+        license_type = "other"
+    else:
+        license_type = "Not identified"
+
+    has_metadata_source = bool((crossref_info and crossref_info.get("licenses")) or (unpaywall_info and unpaywall_info.get("status") == "available"))
+    if license_evidence:
+        detected = "Yes"
+    elif has_metadata_source:
+        detected = "No"
+    else:
+        detected = "Unknown"
+
+    return {
+        "open_access_license_detected": detected,
+        "license_type": license_type,
+        "license_evidence": license_evidence,
+    }
+
+
+def build_source_evidence(crossref_info, unpaywall_info, page_data, page_clues, full_text_info):
+    evidence = []
+
+    if crossref_info:
+        evidence.append({
+            "source": "Crossref",
+            "url": clean_text(crossref_info.get("url", "")) or canonical_doi_url(crossref_info.get("doi", "")),
+            "detail": "DOI metadata retrieved",
+        })
+
+    if unpaywall_info and unpaywall_info.get("status") == "available":
+        best_loc = unpaywall_info.get("best_oa_location") or {}
+        best_loc_url = clean_text(best_loc.get("url", "")) or clean_text(best_loc.get("url_for_pdf", ""))
+        evidence.append({
+            "source": "Unpaywall",
+            "url": best_loc_url,
+            "detail": f"OA status: {clean_text(unpaywall_info.get('oa_status', 'Unknown')) or 'Unknown'}",
+        })
+
+    if page_data:
+        evidence.append({
+            "source": "Publisher webpage",
+            "url": clean_text(page_data.get("page_url", "")),
+            "detail": "Publisher/page metadata parsed",
+        })
+
+    for clue in (page_clues or [])[:8]:
+        evidence.append({
+            "source": "Publisher webpage",
+            "url": clean_text((page_data or {}).get("page_url", "")),
+            "detail": clean_text(clue.get("detail", "")),
+        })
+
+    if full_text_info.get("publisher_full_text_url"):
+        evidence.append({
+            "source": "Publisher full text link",
+            "url": full_text_info.get("publisher_full_text_url", ""),
+            "detail": "Publisher full text URL detected",
+        })
+
+    if full_text_info.get("best_oa_url"):
+        evidence.append({
+            "source": "Free OA link",
+            "url": full_text_info.get("best_oa_url", ""),
+            "detail": "Free OA full-text URL detected",
+        })
+
+    return evidence
+
+
+def determine_open_access_status(full_text_info, license_info, unpaywall_info):
+    free_oa_status = full_text_info.get("free_oa_status", "Unknown")
+    publisher_status = full_text_info.get("publisher_full_text_status", "Unknown")
+    license_status = license_info.get("open_access_license_detected", "Unknown")
+
+    authoritative_oa = bool(
+        unpaywall_info
+        and unpaywall_info.get("status") == "available"
+        and (
+            unpaywall_info.get("best_oa_location")
+            or (unpaywall_info.get("oa_status") or "").lower() in {"gold", "green", "hybrid", "bronze"}
+        )
+    )
+
+    if license_status == "Yes" and full_text_info.get("has_free_oa_full_text"):
+        return "Open Access - Reuse may be permitted subject to the license terms"
+    if license_status == "Yes" and authoritative_oa:
+        return "Open Access - Reuse may be permitted subject to the license terms"
+    if free_oa_status == "Yes":
+        return "Free to Read - Reuse License Not Confirmed"
+    if publisher_status == "Yes":
+        return "Restricted or License Not Identified"
+    if free_oa_status == "No" and publisher_status == "No":
+        return "No Full Text Located"
+    return "Unable to Determine"
+
+
+def classify_tdm_ai_use(assessment, intended_use="Not specified"):
+    license_type = assessment.get("license_type", "Not identified")
+    license_detected = assessment.get("open_access_license_detected", "Unknown")
+    free_oa_status = assessment.get("free_oa_full_text_available", "Unknown")
+    publisher_status = assessment.get("publisher_full_text_available", "Unknown")
+
+    intended_lower = clean_text(intended_use).lower()
+    likely_commercial = any(
+        marker in intended_lower
+        for marker in [
+            "promotional",
+            "website",
+            "government report",
+            "newsmedia",
+            "mobile application",
+            "journal/magazine",
+            "book/textbook",
+            "television",
+            "brochure",
+        ]
+    )
+
+    if license_detected == "Yes":
+        if license_type in {"CC BY", "CC0"}:
+            return (
+                "PERMITTED BY IDENTIFIED LICENSE",
+                "An identified license may permit reuse, but terms still require review for attribution, scope, and downstream use restrictions.",
+            )
+
+        if license_type in {"CC BY-NC", "CC BY-NC-ND"}:
+            if likely_commercial:
+                return (
+                    "LIKELY NEEDS PERMISSION",
+                    "A NonCommercial and/or NoDerivatives license was identified and the intended use may exceed those terms.",
+                )
+            return (
+                "FREE TO READ - AI/TDM RIGHTS UNCLEAR",
+                "A restrictive Creative Commons variant was identified. AI/TDM and derivative-use rights may be limited.",
+            )
+
+        return (
+            "FREE TO READ - AI/TDM RIGHTS UNCLEAR",
+            "A license signal was found, but terms are not fully identified for AI/TDM use.",
+        )
+
+    if free_oa_status == "Yes":
+        return (
+            "FREE TO READ - AI/TDM RIGHTS UNCLEAR",
+            "The article appears free to read, but no reuse license was identified for AI/TDM.",
+        )
+
+    if publisher_status == "Yes":
+        return (
+            "DO NOT UPLOAD FULL TEXT YET",
+            "Publisher full text appears available, but reuse rights are restricted or unclear without license/permission confirmation.",
+        )
+
+    if free_oa_status == "No" and publisher_status == "No":
+        return (
+            "METADATA/ABSTRACT USE ONLY",
+            "No full text was located. Use metadata/abstract only unless rights-cleared full text is obtained.",
+        )
+
+    return (
+        "UNABLE TO DETERMINE",
+        "Insufficient evidence to determine AI/TDM reuse rights. Confirm with publisher terms and internal policy.",
+    )
+
+
+def build_copyright_assessment(
+    crossref_info,
+    unpaywall_info,
+    page_data,
+    page_clues,
+    full_text_info,
+    intended_use="Not specified",
+):
+    license_info = extract_license_signals(crossref_info, unpaywall_info, page_clues)
+    open_access_status = determine_open_access_status(full_text_info, license_info, unpaywall_info)
+
+    publisher_link = clean_text((crossref_info or {}).get("url", ""))
+    doi_link = canonical_doi_url((crossref_info or {}).get("doi", ""))
+    page_link = clean_text((page_data or {}).get("page_url", ""))
+    publisher_or_doi_link = publisher_link or doi_link or page_link
+
+    source_evidence = build_source_evidence(
+        crossref_info=crossref_info,
+        unpaywall_info=unpaywall_info,
+        page_data=page_data,
+        page_clues=page_clues,
+        full_text_info=full_text_info,
+    )
+    source_evidence.extend(license_info.get("license_evidence", []))
+
+    assessment = {
+        "publisher_full_text_available": full_text_info.get("publisher_full_text_status", "Unknown"),
+        "free_oa_full_text_available": full_text_info.get("free_oa_status", "Unknown"),
+        "open_access_license_detected": license_info.get("open_access_license_detected", "Unknown"),
+        "license_type": license_info.get("license_type", "Not identified"),
+        "pdf_link_found": "Yes" if full_text_info.get("pdf_link_found") else "No",
+        "pdf_link": full_text_info.get("pdf_link", ""),
+        "publisher_or_doi_link": publisher_or_doi_link,
+        "open_access_status": open_access_status,
+        "source_evidence": source_evidence,
+    }
+
+    tdm_status, tdm_summary = classify_tdm_ai_use(assessment, intended_use=intended_use)
+    assessment["tdm_ai_use_status"] = tdm_status
+    assessment["tdm_summary"] = tdm_summary
+
+    if open_access_status == "Restricted or License Not Identified":
+        assessment["full_text_availability_note"] = (
+            "Publisher full text appears available, but access may require a subscription, institutional login, or publisher permission."
+        )
+        assessment["reuse_guidance"] = (
+            "The existence of publisher full text does not establish permission to reuse, download, redistribute, or upload the article into an AI system."
+        )
+    elif open_access_status == "Free to Read - Reuse License Not Confirmed":
+        assessment["full_text_availability_note"] = (
+            "Article appears freely readable, but no reuse license was identified."
+        )
+        assessment["reuse_guidance"] = "Do not label this as confirmed Creative Commons open access."
+    elif open_access_status == "Open Access - Reuse may be permitted subject to the license terms":
+        assessment["full_text_availability_note"] = "Free full text appears available with an identified OA/license signal."
+        assessment["reuse_guidance"] = "Reuse may be permitted subject to license terms, attribution, and scope restrictions."
+    elif open_access_status == "No Full Text Located":
+        assessment["full_text_availability_note"] = "No full-text page was identified from the current metadata and page checks."
+        assessment["reuse_guidance"] = "Use metadata/abstract workflows unless rights-cleared full text is later identified."
+    else:
+        assessment["full_text_availability_note"] = "Full-text availability could not be determined from available evidence."
+        assessment["reuse_guidance"] = "Do not assume OA or reuse rights when evidence is incomplete."
+
+    return assessment
+
+
+def calculate_copyright_confidence(input_type, crossref_info, page_clues, unpaywall_info, assessment=None, api_errors=None):
+    """Confidence scoring for OA/licensing conclusions.
+
+    High: explicit license or authoritative OA record found.
+    Medium: multiple reliable metadata sources agree but no explicit license.
+    Low: based on limited page availability/DOI/page clues or failed API checks.
+    """
+    assessment = assessment or {}
+    api_errors = api_errors or []
+
+    explicit_license = assessment.get("open_access_license_detected") == "Yes"
+    authoritative_oa = bool(
+        unpaywall_info
+        and unpaywall_info.get("status") == "available"
+        and (
+            unpaywall_info.get("best_oa_location")
+            or (unpaywall_info.get("oa_status") or "").lower() in {"gold", "green", "hybrid", "bronze"}
+        )
+    )
+
+    reliable_signals = 0
+    if crossref_info and crossref_info.get("doi"):
+        reliable_signals += 1
+    if unpaywall_info and unpaywall_info.get("status") == "available":
+        reliable_signals += 1
+    if (assessment.get("publisher_full_text_available") in {"Yes", "No"}) or (assessment.get("free_oa_full_text_available") in {"Yes", "No"}):
+        reliable_signals += 1
+
+    if api_errors:
+        return "Low"
+    if explicit_license or authoritative_oa:
         return "High"
-    if score >= 45:
+    if reliable_signals >= 2:
         return "Medium"
     return "Low"
 
 
-def interpret_copyright_result(crossref_info, unpaywall_info, page_clues):
+def interpret_copyright_result(crossref_info, unpaywall_info, page_clues, full_text_info=None):
     findings = []
+    full_text_info = full_text_info or {}
 
-    has_crossref_license = bool(crossref_info and crossref_info.get("licenses"))
-    unpaywall_available = bool(unpaywall_info and unpaywall_info.get("status") == "available")
-    is_oa = bool(unpaywall_available and unpaywall_info.get("is_oa"))
-    has_page_clues = bool(page_clues)
     permissions_portal_detected = detect_permissions_portal_for_copyright(crossref_info, page_clues)
+    license_info = extract_license_signals(crossref_info, unpaywall_info, page_clues)
 
-    if has_crossref_license:
-        findings.append("License information was identified in article metadata.")
+    if license_info["open_access_license_detected"] == "Yes":
+        findings.append(f"Open license signal detected ({license_info['license_type']}).")
+    elif license_info["open_access_license_detected"] == "No":
+        findings.append("No open reuse license was identified in the available metadata/page signals.")
+    else:
+        findings.append("License metadata could not be confirmed from the available sources.")
 
-    if unpaywall_available and unpaywall_info.get("oa_status"):
-        findings.append(f"Open-access status identified as {unpaywall_info.get('oa_status')}.")
+    if unpaywall_info and unpaywall_info.get("status") == "available" and unpaywall_info.get("oa_status"):
+        findings.append(f"Unpaywall OA status: {unpaywall_info.get('oa_status')}.")
 
-    if unpaywall_available and unpaywall_info.get("best_oa_location"):
-        findings.append("A free or open-access source location was identified.")
+    if full_text_info.get("publisher_full_text_status") == "Yes":
+        findings.append("Publisher full text appears available.")
+    elif full_text_info.get("publisher_full_text_status") == "No":
+        findings.append("No publisher full text URL was identified.")
+    else:
+        findings.append("Publisher full text availability could not be confirmed.")
+
+    if full_text_info.get("free_oa_status") == "Yes":
+        findings.append("A free OA full-text route was identified.")
+    elif full_text_info.get("free_oa_status") == "No":
+        findings.append("No free OA full-text route was identified.")
+    else:
+        findings.append("Free OA full-text availability could not be confirmed.")
 
     if permissions_portal_detected:
         findings.append("A permissions workflow signal was detected.")
 
-    if has_crossref_license:
-        category = "Likely licensed / open or reusable under stated terms"
-        summary = (
-            "License metadata was found for this article. That is a strong sign that reuse terms may be explicitly available."
-        )
-    elif is_oa:
-        category = "Likely open access, but verify reuse terms"
-        summary = (
-            "The article appears to have an open-access route available. Access may be available, but reuse still depends on the exact license."
-        )
-    elif permissions_portal_detected:
-        category = "Permission workflow likely required"
-        summary = (
-            "This content appears to be associated with a permissions workflow, which suggests reuse may require formal clearance depending on intended use."
-        )
-    elif has_page_clues:
-        joined = " ".join(clue["detail"].lower() for clue in page_clues)
+    oa_status = determine_open_access_status(full_text_info, license_info, unpaywall_info)
 
-        if "all rights reserved" in joined or "copyright" in joined:
-            category = "Likely copyrighted with restrictions"
-            summary = (
-                "The article page contains copyright language suggesting that reuse is restricted unless permission is granted."
-            )
-        elif "creative commons" in joined or "cc by" in joined or "cc-by" in joined:
-            category = "Likely openly licensed"
-            summary = (
-                "The article page references an open license, suggesting that some reuse rights may apply."
-            )
-        else:
-            category = "Unclear"
-            summary = (
-                "Some licensing-related terms were detected, but not enough to make a strong classification."
-            )
+    if oa_status == "Open Access - Reuse may be permitted subject to the license terms":
+        category = "Confirmed OA/License Signal"
+        summary = "Open-access and/or explicit license evidence was identified. Reuse may be possible within license limits."
+    elif oa_status == "Free to Read - Reuse License Not Confirmed":
+        category = "Free to Read - License Unclear"
+        summary = "The article appears freely readable, but no confirmed reuse license was identified."
+    elif oa_status == "Restricted or License Not Identified":
+        category = "Publisher Full Text Available - Reuse Unclear"
+        summary = "Publisher full text appears available, but access and reuse rights may require subscription, login, or permission."
+    elif oa_status == "No Full Text Located":
+        category = "No Full Text Located"
+        summary = "No publisher or free OA full text route was identified from available sources."
     else:
-        category = "Likely copyrighted or unclear"
-        summary = (
-            "No strong open-license signal was found. Publisher-specific terms should be reviewed before reuse."
-        )
+        category = "Unable to Determine"
+        summary = "Evidence is incomplete; avoid assumptions about open access or reuse rights."
 
     return category, summary, findings, permissions_portal_detected
 
 
-def get_intended_use_guidance_for_copyright(category, intended_use, permissions_portal_detected, crossref_info, unpaywall_info):
-    category_lower = category.lower()
-    has_license = bool(crossref_info and crossref_info.get("licenses"))
-    oa_status = (unpaywall_info.get("oa_status") or "").lower() if unpaywall_info else ""
+def get_intended_use_guidance_for_copyright(assessment, intended_use):
+    oa_status = assessment.get("open_access_status", "")
+    tdm_status = assessment.get("tdm_ai_use_status", "UNABLE TO DETERMINE")
 
-    if intended_use == "Not specified":
-        if "licensed" in category_lower or "openly licensed" in category_lower:
-            return ("success", "This article shows license signals. Review the license terms before reuse.")
-
-        if "permission workflow" in category_lower:
-            return ("warning", "A permissions workflow appears likely. Select an intended use for more targeted guidance.")
-
-        if "open access" in category_lower:
-            return ("warning", "The article may be available to read, but reuse rights still depend on the specific license.")
-
-        return ("info", "Select an intended use to get more specific reuse guidance.")
-
-    intended_lower = intended_use.lower()
-
-    if has_license:
+    if oa_status == "Open Access - Reuse may be permitted subject to the license terms":
         return (
             "success",
-            f"For '{intended_use}', the article appears to have a license signal. Review the exact license before reuse, especially for attribution, commercial use, modification, and redistribution.",
+            f"For '{intended_use}', reuse may be possible under the identified license, but you must verify attribution, commercial-use, and derivative-use conditions before proceeding.",
         )
 
-    if oa_status in {"green", "gold", "bronze", "hybrid"}:
-        if any(term in intended_lower for term in ["email", "intranet", "website", "presentation", "training", "coursepack"]):
-            return (
-                "warning",
-                f"For '{intended_use}', the article may be accessible, but reuse is not automatically approved. Confirm whether the license covers redistribution, posting, or educational reuse.",
-            )
-
+    if oa_status == "Free to Read - Reuse License Not Confirmed":
         return (
             "warning",
-            f"For '{intended_use}', the article may be accessible, but permission may still be needed depending on how the content will be reused.",
+            f"For '{intended_use}', the article appears free to read, but reuse rights are not confirmed. Do not treat this as confirmed Creative Commons OA.",
         )
 
-    if permissions_portal_detected:
-        return ("error", f"For '{intended_use}', a formal permissions workflow is likely required before reuse.")
-
-    if any(term in intended_lower for term in ["email", "photocopies", "website", "intranet", "promotional", "mobile application", "coursepack"]):
+    if oa_status == "Restricted or License Not Identified":
         return (
             "error",
-            f"For '{intended_use}', this appears likely restricted unless a license or permission specifically allows it.",
+            f"For '{intended_use}', publisher full text appears available but rights are restricted or unclear. Permission may be required before reuse or AI upload.",
         )
 
-    return ("info", f"For '{intended_use}', the available signals are not definitive. Review publisher-specific permissions before reuse.")
+    if tdm_status in {"DO NOT UPLOAD FULL TEXT YET", "LIKELY NEEDS PERMISSION"}:
+        return (
+            "error",
+            f"For '{intended_use}', current evidence indicates you should not upload full text until rights are confirmed.",
+        )
+
+    return (
+        "info",
+        f"For '{intended_use}', evidence is incomplete. Use metadata/abstract workflows until rights are confirmed.",
+    )
 
 
-def build_copyright_report(input_type, user_input, intended_use, crossref_info, unpaywall_info, category, summary, confidence, full_text_info=None):
+def build_copyright_report(input_type, user_input, intended_use, crossref_info, unpaywall_info, category, summary, confidence, full_text_info=None, assessment=None):
     full_text_info = full_text_info or {}
+    assessment = assessment or {}
     best_oa_url = full_text_info.get("best_oa_url") or get_best_oa_url(unpaywall_info)
     publisher_full_text_url = full_text_info.get("publisher_full_text_url", "")
 
@@ -5023,6 +5358,12 @@ def build_copyright_report(input_type, user_input, intended_use, crossref_info, 
         f"- **Intended use:** {intended_use}",
         "",
         f"- **Assessment category:** {category}",
+        f"- **Open Access status:** {assessment.get('open_access_status', 'Unable to Determine')}",
+        f"- **Publisher full text available:** {assessment.get('publisher_full_text_available', 'Unknown')}",
+        f"- **Free OA full text available:** {assessment.get('free_oa_full_text_available', 'Unknown')}",
+        f"- **Open-access license detected:** {assessment.get('open_access_license_detected', 'Unknown')}",
+        f"- **License type:** {assessment.get('license_type', 'Not identified')}",
+        f"- **TDM/AI-use status:** {assessment.get('tdm_ai_use_status', 'UNABLE TO DETERMINE')}",
         f"- **Confidence:** {confidence}",
         "",
         "#### Summary",
@@ -5033,6 +5374,22 @@ def build_copyright_report(input_type, user_input, intended_use, crossref_info, 
         "- Reuse of figures, tables, or substantial excerpts may require permission.",
         "- Open access does not always equal unrestricted commercial reuse.",
     ]
+
+    if assessment.get("open_access_status") == "Restricted or License Not Identified":
+        lines.extend([
+            "",
+            "#### Full-text and reuse clarification",
+            "- Open Access Status: Restricted or License Not Identified",
+            "- Full Text Availability: Publisher full text appears available, but access may require a subscription, institutional login, or publisher permission.",
+            "- Reuse Guidance: The existence of publisher full text does not establish permission to reuse, download, redistribute, or upload the article into an AI system.",
+        ])
+    elif assessment.get("open_access_status") == "Free to Read - Reuse License Not Confirmed":
+        lines.extend([
+            "",
+            "#### Full-text and reuse clarification",
+            "- Open Access Status: Free to Read - Reuse License Not Confirmed",
+            "- Note: This should not be treated as confirmed Creative Commons open access.",
+        ])
 
     if crossref_info:
         lines.extend([
@@ -5060,6 +5417,18 @@ def build_copyright_report(input_type, user_input, intended_use, crossref_info, 
         lines.append(
             f"- **Publisher full text (may require subscription/login):** [{publisher_full_text_url}]({publisher_full_text_url})"
         )
+
+    evidence_rows = assessment.get("source_evidence", []) or []
+    if evidence_rows:
+        lines.extend(["", "#### Source evidence"])
+        for item in evidence_rows:
+            src = item.get("source", "Source")
+            detail = item.get("detail", "")
+            url = item.get("url", "")
+            if url:
+                lines.append(f"- **{src}:** {detail} ([link]({url}))")
+            else:
+                lines.append(f"- **{src}:** {detail}")
 
     return "\n".join(lines)
 
@@ -6193,7 +6562,7 @@ def screening_excel_bytes(screening_df, summary_df=None):
 
 def tdm_rights_assessment_from_input(title_or_url="", doi="", intended_use="AI summarization / internal review"):
     result = {
-        "status": "UNCLEAR - REVIEW REQUIRED",
+        "status": "UNABLE TO DETERMINE",
         "summary": "No definitive TDM or AI-use permission signal was confirmed.",
         "source": "",
         "recommendation": "Review publisher terms, client policy, and license language before uploading full text into AI tools.",
@@ -6203,12 +6572,21 @@ def tdm_rights_assessment_from_input(title_or_url="", doi="", intended_use="AI s
         unpaywall_info = {"status": "unavailable"}
         page_clues = []
         page_data = None
+        full_text_info = {}
 
         if doi and looks_like_doi(normalize_doi(doi)):
             doi_clean = normalize_doi(doi)
             crossref_data = get_crossref_by_doi(doi_clean)
             crossref_info = crossref_summary(crossref_data.get("message", {}))
             unpaywall_info = check_unpaywall(doi_clean)
+            if crossref_info.get("url"):
+                try:
+                    fetched = fetch_url_for_copyright(crossref_info["url"])
+                    page_data = extract_page_metadata_for_copyright(fetched["text"], fetched["final_url"])
+                    page_clues = find_license_clues_for_copyright(page_data)
+                except Exception:
+                    page_data = None
+                    page_clues = []
         elif title_or_url:
             if title_or_url.lower().startswith("http"):
                 fetched = fetch_url_for_copyright(title_or_url)
@@ -6222,17 +6600,18 @@ def tdm_rights_assessment_from_input(title_or_url="", doi="", intended_use="AI s
                     if crossref_info.get("doi"):
                         unpaywall_info = check_unpaywall(crossref_info["doi"])
 
-        category, summary, findings, _ = interpret_copyright_result(crossref_info, unpaywall_info, page_clues)
-        oa_status = (unpaywall_info.get("oa_status") or "").lower() if unpaywall_info else ""
+        full_text_info = detect_full_text_availability(crossref_info, page_data, unpaywall_info)
+        assessment = build_copyright_assessment(
+            crossref_info=crossref_info,
+            unpaywall_info=unpaywall_info,
+            page_data=page_data,
+            page_clues=page_clues,
+            full_text_info=full_text_info,
+            intended_use=intended_use,
+        )
 
-        if oa_status in {"gold", "green", "hybrid"} or "creative commons" in " ".join(findings).lower():
-            result["status"] = "POSSIBLE PERMISSION SIGNAL - VERIFY LICENSE"
-            result["summary"] = "Open-access or license signals were detected, but TDM/AI-use rights still need confirmation."
-        elif "closed" in oa_status or "copyrighted" in category.lower() or "permission" in category.lower():
-            result["status"] = "LIKELY NEEDS PERMISSION / DO NOT UPLOAD FULL TEXT YET"
-            result["summary"] = "The source appears restricted or unclear for reuse/TDM."
-        else:
-            result["summary"] = summary
+        result["status"] = assessment.get("tdm_ai_use_status", "UNABLE TO DETERMINE")
+        result["summary"] = assessment.get("tdm_summary", result["summary"])
 
         if crossref_info:
             result["source"] = f"{crossref_info.get('title','')} | DOI: {crossref_info.get('doi','')} | {crossref_info.get('publisher','')}"
@@ -7067,12 +7446,17 @@ with tab_copyright:
                 page_clues = []
                 tdm_result = None
                 full_text_info = {}
+                assessment = {}
+                api_errors = []
 
                 with st.spinner("Running copyright assessment..."):
                     if copyright_input_type == "URL":
-                        fetched = fetch_url_for_copyright(copyright_user_input)
-                        page_data = extract_page_metadata_for_copyright(fetched["text"], fetched["final_url"])
-                        page_clues = find_license_clues_for_copyright(page_data)
+                        try:
+                            fetched = fetch_url_for_copyright(copyright_user_input)
+                            page_data = extract_page_metadata_for_copyright(fetched["text"], fetched["final_url"])
+                            page_clues = find_license_clues_for_copyright(page_data)
+                        except Exception as error:
+                            api_errors.append(f"Publisher page fetch failed: {error}")
 
                     elif copyright_input_type == "DOI":
                         doi = normalize_doi(copyright_user_input)
@@ -7081,46 +7465,72 @@ with tab_copyright:
                             st.error("That does not look like a valid DOI.")
                             st.stop()
 
-                        crossref_data = get_crossref_by_doi(doi)
-                        crossref_item = crossref_data.get("message", {})
-                        crossref_info = crossref_summary(crossref_item)
-                        unpaywall_info = check_unpaywall(doi)
+                        try:
+                            crossref_data = get_crossref_by_doi(doi)
+                            crossref_item = crossref_data.get("message", {})
+                            crossref_info = crossref_summary(crossref_item)
+                        except Exception as error:
+                            api_errors.append(f"Crossref DOI lookup failed: {error}")
+
+                        try:
+                            unpaywall_info = check_unpaywall(doi)
+                        except Exception as error:
+                            unpaywall_info = {"status": "unavailable"}
+                            api_errors.append(f"Unpaywall lookup failed: {error}")
 
                         if crossref_info.get("url"):
                             try:
                                 fetched = fetch_url_for_copyright(crossref_info["url"])
                                 page_data = extract_page_metadata_for_copyright(fetched["text"], fetched["final_url"])
                                 page_clues = find_license_clues_for_copyright(page_data)
-                            except Exception:
+                            except Exception as error:
                                 page_data = None
                                 page_clues = []
+                                api_errors.append(f"Publisher page fetch failed: {error}")
 
                     elif copyright_input_type == "Title":
-                        crossref_data = search_crossref_by_title_for_copyright(copyright_user_input)
-                        crossref_item = choose_best_title_match_for_copyright(crossref_data)
-
-                        if not crossref_item:
-                            st.error("No likely match found in Crossref.")
-                            st.stop()
-
-                        crossref_info = crossref_summary(crossref_item)
+                        try:
+                            crossref_data = search_crossref_by_title_for_copyright(copyright_user_input)
+                            crossref_item = choose_best_title_match_for_copyright(crossref_data)
+                            if crossref_item:
+                                crossref_info = crossref_summary(crossref_item)
+                            else:
+                                api_errors.append("No likely title match found in Crossref.")
+                        except Exception as error:
+                            api_errors.append(f"Crossref title lookup failed: {error}")
 
                         if crossref_info.get("doi"):
-                            unpaywall_info = check_unpaywall(crossref_info["doi"])
+                            try:
+                                unpaywall_info = check_unpaywall(crossref_info["doi"])
+                            except Exception as error:
+                                unpaywall_info = {"status": "unavailable"}
+                                api_errors.append(f"Unpaywall lookup failed: {error}")
 
                         if crossref_info.get("url"):
                             try:
                                 fetched = fetch_url_for_copyright(crossref_info["url"])
                                 page_data = extract_page_metadata_for_copyright(fetched["text"], fetched["final_url"])
                                 page_clues = find_license_clues_for_copyright(page_data)
-                            except Exception:
+                            except Exception as error:
                                 page_data = None
                                 page_clues = []
+                                api_errors.append(f"Publisher page fetch failed: {error}")
+
+                    full_text_info = detect_full_text_availability(crossref_info, page_data, unpaywall_info)
+                    assessment = build_copyright_assessment(
+                        crossref_info=crossref_info,
+                        unpaywall_info=unpaywall_info,
+                        page_data=page_data,
+                        page_clues=page_clues,
+                        full_text_info=full_text_info,
+                        intended_use=copyright_intended_use,
+                    )
 
                     category, summary, findings, permissions_portal_detected = interpret_copyright_result(
                         crossref_info,
                         unpaywall_info,
                         page_clues,
+                        full_text_info=full_text_info,
                     )
 
                     confidence = calculate_copyright_confidence(
@@ -7128,9 +7538,10 @@ with tab_copyright:
                         crossref_info,
                         page_clues,
                         unpaywall_info,
+                        assessment=assessment,
+                        api_errors=api_errors,
                     )
-
-                    full_text_info = detect_full_text_availability(crossref_info, page_data, unpaywall_info)
+                    assessment["confidence"] = confidence
 
                     report = build_copyright_report(
                         copyright_input_type,
@@ -7142,6 +7553,7 @@ with tab_copyright:
                         summary,
                         confidence,
                         full_text_info=full_text_info,
+                        assessment=assessment,
                     )
 
                     if run_tmdi_check:
@@ -7175,21 +7587,22 @@ with tab_copyright:
                         "journal": crossref_info.get("journal") if crossref_info else "",
                         "category": category,
                         "confidence": confidence,
-                        "oa_status": unpaywall_info.get("oa_status") if unpaywall_info else "",
-                        "best_oa_url": get_best_oa_url(unpaywall_info),
+                        "open_access_status": assessment.get("open_access_status", "Unable to Determine"),
+                        "publisher_full_text_available": assessment.get("publisher_full_text_available", "Unknown"),
+                        "free_oa_full_text_available": assessment.get("free_oa_full_text_available", "Unknown"),
+                        "open_access_license_detected": assessment.get("open_access_license_detected", "Unknown"),
+                        "license_type": assessment.get("license_type", "Not identified"),
+                        "pdf_available": assessment.get("pdf_link_found", "No"),
+                        "tdm_ai_use_status": assessment.get("tdm_ai_use_status", "UNABLE TO DETERMINE"),
+                        "publisher_or_doi_link": assessment.get("publisher_or_doi_link", ""),
+                        "best_oa_url": full_text_info.get("best_oa_url", ""),
+                        "publisher_full_text_url": full_text_info.get("publisher_full_text_url", ""),
+                        "api_warnings": " | ".join(api_errors),
                     }
                     st.session_state.copyright_log.append(log_row)
 
-                oa_status = ""
                 available_url = full_text_info.get("best_oa_url", "")
                 publisher_full_text_url = full_text_info.get("publisher_full_text_url", "")
-                has_free_oa_full_text = bool(full_text_info.get("has_free_oa_full_text"))
-                has_publisher_full_text = bool(full_text_info.get("has_publisher_full_text"))
-
-                if unpaywall_info and unpaywall_info.get("status") == "available":
-                    oa_status = unpaywall_info.get("oa_status", "")
-                if unpaywall_info and unpaywall_info.get("status") == "available":
-                    oa_status = unpaywall_info.get("oa_status", "")
 
                 left, right = st.columns([2, 1])
 
@@ -7199,20 +7612,24 @@ with tab_copyright:
                     st.write(summary)
                     st.write(f"**Confidence:** {confidence}")
 
-                    if oa_status:
-                        st.subheader("Open Access Status")
-                        render_status_badge(oa_status)
+                    if api_errors:
+                        st.warning("Some data sources could not be fully checked. Unknown values are shown where evidence is incomplete.")
 
-                        if oa_status.lower() == "closed" and publisher_full_text_url:
-                            st.info("OA is Closed (no free OA copy identified), but publisher full text appears available below.")
+                    st.subheader("Copyright / Open Access Snapshot")
+                    summary_rows = pd.DataFrame([
+                        {"Field": "Open Access Status", "Value": assessment.get("open_access_status", "Unable to Determine")},
+                        {"Field": "Full Text Availability", "Value": assessment.get("full_text_availability_note", "")},
+                        {"Field": "License Detected", "Value": assessment.get("open_access_license_detected", "Unknown")},
+                        {"Field": "License Type", "Value": assessment.get("license_type", "Not identified")},
+                        {"Field": "Publisher Full Text", "Value": assessment.get("publisher_full_text_available", "Unknown")},
+                        {"Field": "Free OA Full Text", "Value": assessment.get("free_oa_full_text_available", "Unknown")},
+                        {"Field": "PDF Available", "Value": assessment.get("pdf_link_found", "No")},
+                        {"Field": "TDM/AI-Use Status", "Value": assessment.get("tdm_ai_use_status", "UNABLE TO DETERMINE")},
+                        {"Field": "Confidence", "Value": confidence},
+                    ])
+                    st.dataframe(summary_rows, use_container_width=True, hide_index=True)
 
-                    guidance_type, guidance_text = get_intended_use_guidance_for_copyright(
-                        category,
-                        copyright_intended_use,
-                        permissions_portal_detected,
-                        crossref_info,
-                        unpaywall_info,
-                    )
+                    guidance_type, guidance_text = get_intended_use_guidance_for_copyright(assessment, copyright_intended_use)
 
                     st.subheader("Intended Use Guidance")
                     if guidance_type == "success":
@@ -7222,11 +7639,30 @@ with tab_copyright:
                     elif guidance_type == "error":
                         st.error(guidance_text)
                     else:
-                        pass
+                        st.info(guidance_text)
+
+                    st.subheader("Reuse Guidance")
+                    st.info(assessment.get("reuse_guidance", "Review publisher terms, client agreements, institutional subscriptions, and internal policies before reuse."))
+
+                    if assessment.get("open_access_status") == "Restricted or License Not Identified":
+                        st.markdown("**Open Access Status:** Restricted or License Not Identified")
+                        st.markdown(
+                            "**Full Text Availability:** Publisher full text appears available, but access may require a subscription, institutional login, or publisher permission."
+                        )
+                        st.markdown(
+                            "**Reuse Guidance:** The existence of publisher full text does not establish permission to reuse, download, redistribute, or upload the article into an AI system."
+                        )
+
+                    if assessment.get("open_access_status") == "Free to Read - Reuse License Not Confirmed":
+                        st.markdown("**Open Access Status:** Free to Read - Reuse License Not Confirmed")
+                        st.markdown("Do not label this as confirmed Creative Commons open access.")
 
                     st.subheader("Full Text Availability")
-                    st.write(f"**Free OA full text:** {'Yes' if has_free_oa_full_text else 'No'}")
-                    st.write(f"**Publisher full text (may require login/subscription):** {'Yes' if has_publisher_full_text else 'No'}")
+                    st.write(f"**Free OA full text:** {assessment.get('free_oa_full_text_available', 'Unknown')}")
+                    st.write(f"**Publisher full text (may require login/subscription):** {assessment.get('publisher_full_text_available', 'Unknown')}")
+                    st.write(f"**Open-access license detected:** {assessment.get('open_access_license_detected', 'Unknown')}")
+                    st.write(f"**License type:** {assessment.get('license_type', 'Not identified')}")
+                    st.write(f"**PDF link found:** {assessment.get('pdf_link_found', 'No')}")
 
                     if available_url and not is_permissions_portal_url(available_url):
                         render_url_link("Free OA full text", available_url)
@@ -7234,14 +7670,39 @@ with tab_copyright:
                     if publisher_full_text_url and publisher_full_text_url != available_url:
                         render_url_link("Publisher full text (may require login/subscription)", publisher_full_text_url)
 
+                    if assessment.get("pdf_link"):
+                        render_url_link("PDF link", assessment.get("pdf_link", ""))
+
+                    if assessment.get("publisher_or_doi_link"):
+                        render_url_link("Publisher or DOI link", assessment.get("publisher_or_doi_link", ""))
+
                     if run_tmdi_check and tdm_result:
-                        st.subheader("TDMI (TDM/AI-Use) Check")
+                        st.subheader("TDM/AI-Use")
                         st.write(f"**Status:** {tdm_result.get('status', '')}")
                         st.write(f"**Summary:** {tdm_result.get('summary', '')}")
                         if tdm_result.get("source"):
                             st.write(f"**Source:** {tdm_result.get('source')}")
                         if tdm_result.get("recommendation"):
                             st.info(tdm_result.get("recommendation"))
+
+                    st.subheader("Source Evidence")
+                    evidence_rows = assessment.get("source_evidence", []) or []
+                    if evidence_rows:
+                        for item in evidence_rows:
+                            src = item.get("source", "Source")
+                            detail = item.get("detail", "")
+                            url = item.get("url", "")
+                            if url:
+                                st.markdown(f"- **{src}:** {detail} ([link]({url}))")
+                            else:
+                                st.markdown(f"- **{src}:** {detail}")
+                    else:
+                        st.write("- No source evidence captured.")
+
+                    if api_errors:
+                        st.subheader("API / Retrieval Notes")
+                        for note in api_errors:
+                            st.write(f"- {note}")
 
                     st.subheader("Key Findings")
                     for finding in findings:
@@ -7268,6 +7729,8 @@ with tab_copyright:
                         st.write(f"**Title:** {page_data.get('title', '')}")
                         if page_data.get("domain"):
                             st.write(f"**Source:** {page_data.get('domain')}")
+
+                    st.caption("Publisher terms, client agreements, institutional subscriptions, and internal policies may control reuse.")
 
             except requests.exceptions.RequestException as e:
                 st.error(f"Network/API request failed: {e}")
