@@ -36,7 +36,7 @@ except ImportError:
 try:
     from sentence_transformers import SentenceTransformer
     _SENTENCE_TRANSFORMERS_AVAILABLE = True
-except ImportError:
+except Exception:
     SentenceTransformer = None
     _SENTENCE_TRANSFORMERS_AVAILABLE = False
 
@@ -44,7 +44,7 @@ try:
     from qdrant_client import QdrantClient
     from qdrant_client.models import Distance, VectorParams, PointStruct
     _QDRANT_AVAILABLE = True
-except ImportError:
+except Exception:
     QdrantClient = None
     Distance = None
     VectorParams = None
